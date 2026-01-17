@@ -67,17 +67,12 @@ python sd3.5.py \
 ## Examples
 
 
-### Jigsaw Transform: Einstein ↔ Marilyn (Pop Art)
+### 90 degree rotation transform: Einstein ↔ Marilyn (Pop Art)
 
-```bash
-python sd3.5.py \
-  --transform jigsaw \
-  --style-prompt "a pop art of" \
-  --prompt1 "albert einstein" \
-  --prompt2 "marilyn monroe" \
-  --output-dir "outputs/einstein_marilyn/" \
-  --seed 1
-```
+- Style-Prompt : "a pop art of" 
+- Prompt1 : "albert einstein"
+- Prompt2 : "marilyn monroe"
+
 
 | View 1 (Einstein) | View 2 (Marilyn) |
 |:---:|:---:|
@@ -87,23 +82,51 @@ python sd3.5.py \
 
 ### Jigsaw Transform: Fruit Bowl ↔ Gorilla
 
+- Style-Prompt : "an oil painting of" 
+- Prompt1 : "a bowl of fruits"
+- Prompt2 : "a gorilla"
+
 | View 1 (Fruit) | View 2 (Gorilla) |
 |:---:|:---:|
 | ![Fruit](diffusers/outputs/fruit_gorilla/generated_image1.png) | ![Gorilla](diffusers/outputs/fruit_gorilla/generated_image2.png) |
 
 ---
 
-### Rotation Transform: Einstein ↔ Marilyn (135°)
+### 90 degree rotation transform: Village ↔ Horse 
 
-```bash
-python sd3.5.py \
-  --transform 135rot \
-  --style-prompt "a pop art of" \
-  --prompt1 "albert einstein" \
-  --prompt2 "marilyn monroe" \
-  --output-dir "outputs/einstein_marilyn_rot/" \
-  --seed 1
-```
+- Style-Prompt : "a painting of" 
+- Prompt1 : "a village"
+- Prompt2 : "a horse"
+
+| View 1 (Village) | View 2 (Horse) |
+|:---:|:---:|
+| ![Fruit](diffusers/outputs/horse_village/generated_image1.png) | ![Gorilla](diffusers/outputs/horse_village/generated_image2.png) |
+
+
+### 90 degree rotation transform: Village ↔ Ship 
+
+- Style-Prompt : "an oil painting of" 
+- Prompt1 : "a ship"
+- Prompt2 : "a village in the mountains"
+
+| View 1 (Ship) | View 2 (Village) |
+|:---:|:---:|
+| ![Ship](diffusers/outputs/ship_town/generated_image1_3.png) | ![Village](diffusers/outputs/ship_town/generated_image2_3.png) |
+
+### 90 degree inner circular transform: Cave ↔ Parrot 
+
+- Style-Prompt : "a rendering of" 
+- Prompt1 : "an icy cave"
+- Prompt2 : "a parrot"
+
+| View 1 (Cave) | View 2 (Parrot) |
+|:---:|:---:|
+| ![Ship](diffusers/outputs/parrot_cave/generated_image1.png) | ![Village](diffusers/outputs/parrot_cave/generated_image2.png) |
+
+
+
+
+
 
 ---
 
