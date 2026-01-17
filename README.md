@@ -1,12 +1,16 @@
 # LookingGlass: Generative Anamorphoses via Laplacian Pyramid Warping
 
-An implementation of 2D latent generative anamorphoses using Stable Diffusion 3.5, based on the LookingGlass paper.
+An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5, based on the LookingGlass paper.
 
 This project generates **anamorphic images** — single images that reveal different content when viewed from different perspectives or transformations. For example, an image that looks like Einstein when viewed normally, but reveals Marilyn Monroe when rotated or rearranged.
 
-## Citation
+> **Note:** This implementation includes the basic 2D transformations suggested in the LookingGlass paper, such as **circular rotations** (90°, 135°, 180°), **vertical/horizontal flipping**, and the **jigsaw permutation** from Geng et al. The full 3D anamorphosis features from the original paper are not included.
 
-If you use this code, please cite the original paper:
+## Citations
+
+If you use this code, please cite the original papers. We thank the authors for their work:
+
+**LookingGlass (Laplacian Pyramid Warping method):**
 
 ```bibtex
 @misc{chang2025lookingglassgenerativeanamorphoseslaplacian,
@@ -17,6 +21,20 @@ If you use this code, please cite the original paper:
       archivePrefix={arXiv},
       primaryClass={cs.CV},
       url={https://arxiv.org/abs/2504.08902}, 
+}
+```
+
+**Visual Anagrams (Jigsaw transform):**
+
+```bibtex
+@inproceedings{geng2024visualanagrams,
+      title={Visual Anagrams: Generating Multi-View Optical Illusions with Diffusion Models},
+      author={Daniel Geng and Inbum Park and Andrew Owens},
+      booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+      year={2024},
+      eprint={2311.17919},
+      archivePrefix={arXiv},
+      url={https://arxiv.org/abs/2311.17919},
 }
 ```
 
@@ -68,7 +86,7 @@ python sd3.5.py \
 | `90rot` | 90° circular rotation in center region |
 | `135rot` | 135° circular rotation in center region |
 | `180rot` | 180° circular rotation in center region |
-| `jigsaw` | Jigsaw puzzle permutation — rearranging tiles reveals second image |
+| `jigsaw` | Jigsaw puzzle permutation (from [Geng et al.](https://arxiv.org/abs/2311.17919)) — rearranging tiles reveals second image |
 
 ---
 
