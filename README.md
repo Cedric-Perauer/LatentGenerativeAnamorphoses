@@ -1,6 +1,6 @@
-# LookingGlass: Generative Anamorphoses via Laplacian Pyramid Warping
+# Latent Generative Anamorphoses 
 
-An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5, based on the LookingGlass paper.
+An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5, inspired by the LookingGlass paper [CVPR2025].
 
 This project generates **anamorphic images** — single images that reveal different content when viewed from different perspectives or transformations. For example, an image that looks like Einstein when viewed normally, but reveals Marilyn Monroe when rotated or rearranged.
 
