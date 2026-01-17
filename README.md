@@ -103,6 +103,18 @@ python sd3.5.py \
 | ![Fruit](diffusers/outputs/horse_village/generated_image1.png) | ![Gorilla](diffusers/outputs/horse_village/generated_image2.png) |
 
 
+### Jigsaw puzzle transform: Puppy ↔ Cat 
+
+- Style-Prompt : "a water color painting of" 
+- Prompt1 : "a puppy"
+- Prompt2 : "a cat"
+
+| View 1 (Puppy) | View 2 (Cat) |
+|:---:|:---:|
+| ![Ship](diffusers/outputs/jigsaw/puppy.png) | ![Village](diffusers/outputs/jigsaw/cat.png) |
+
+
+
 ### 90 degree rotation transform: Village ↔ Ship 
 
 - Style-Prompt : "an oil painting of" 
@@ -113,6 +125,18 @@ python sd3.5.py \
 |:---:|:---:|
 | ![Ship](diffusers/outputs/ship_town/generated_image1_3.png) | ![Village](diffusers/outputs/ship_town/generated_image2_3.png) |
 
+### Jigsaw puzzle transform: Flowers ↔ Bird 
+
+- Style-Prompt : "a water color painting of" 
+- Prompt1 : "flowers"
+- Prompt2 : "a bird"
+
+| View 1 (Flowers) | View 2 (Bird) |
+|:---:|:---:|
+| ![Ship](diffusers/outputs/jigsaw/generated_image1_flowers.png) | ![Village](diffusers/outputs/jigsaw/generated_image2_flowers.png) |
+
+
+
 ### 90 degree inner circular transform: Cave ↔ Parrot 
 
 - Style-Prompt : "a rendering of" 
@@ -122,6 +146,18 @@ python sd3.5.py \
 | View 1 (Cave) | View 2 (Parrot) |
 |:---:|:---:|
 | ![Ship](diffusers/outputs/parrot_cave/generated_image1.png) | ![Village](diffusers/outputs/parrot_cave/generated_image2.png) |
+
+
+### 90 degree rotation transform: Man ↔ Camp Fire 
+
+- Style-Prompt : "an oil painting of" 
+- Prompt1 : "people at a camp fire"
+- Prompt2 : "a man"
+
+| View 1 (Man) | View 2 (Camp Fire) |
+|:---:|:---:|
+| ![Ship](diffusers/outputs/man_campfire/generated_image1.png) | ![Village](diffusers/outputs/man_campfire/generated_image2.png) |
+
 
 
 
