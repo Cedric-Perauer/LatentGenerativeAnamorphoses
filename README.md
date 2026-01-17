@@ -1,42 +1,16 @@
 # Latent Generative Anamorphoses 
 
-An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5, inspired by the LookingGlass paper [CVPR2025].
+An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5, inspired by the [LookingGlass](https://arxiv.org/abs/2504.08902) paper [CVPR2025].
 
 This project generates **anamorphic images** — single images that reveal different content when viewed from different perspectives or transformations. For example, an image that looks like Einstein when viewed normally, but reveals Marilyn Monroe when rotated or rearranged.
 
 > **Note:** This implementation includes the basic 2D transformations suggested in the LookingGlass paper, such as **circular rotations** (90°, 135°, 180°), **vertical/horizontal flipping**, and the **jigsaw permutation** from Geng et al. The full 3D anamorphosis features from the original paper are not included.
 
-## Citations
 
-If you use this code, please cite the original papers. We thank the authors for their work:
+| Jigsaw Puzzle : View 1 (Cat) | Jigsaw Puzzle : View 2 (Puppy) |
+|:---:|:---:|
+| ![Cat](diffusers/outputs/puppy_cat_pop_art/generated_image1.png) | ![Puppy](diffusers/outputs/puppy_cat_pop_art/generated_image2.png) |
 
-**LookingGlass (Laplacian Pyramid Warping method):**
-
-```bibtex
-@misc{chang2025lookingglassgenerativeanamorphoseslaplacian,
-      title={LookingGlass: Generative Anamorphoses via Laplacian Pyramid Warping}, 
-      author={Pascal Chang and Sergio Sancho and Jingwei Tang and Markus Gross and Vinicius C. Azevedo},
-      year={2025},
-      eprint={2504.08902},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV},
-      url={https://arxiv.org/abs/2504.08902}, 
-}
-```
-
-**Visual Anagrams (Jigsaw transform):**
-
-```bibtex
-@inproceedings{geng2024visualanagrams,
-      title={Visual Anagrams: Generating Multi-View Optical Illusions with Diffusion Models},
-      author={Daniel Geng and Inbum Park and Andrew Owens},
-      booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
-      year={2024},
-      eprint={2311.17919},
-      archivePrefix={arXiv},
-      url={https://arxiv.org/abs/2311.17919},
-}
-```
 
 ## Installation
 
@@ -92,23 +66,6 @@ python sd3.5.py \
 
 ## Examples
 
-### Jigsaw Transform: Cat ↔ Puppy (Pop Art)
-
-```bash
-python sd3.5.py \
-  --transform jigsaw \
-  --style-prompt "a pop art of" \
-  --prompt1 "a cat" \
-  --prompt2 "a puppy" \
-  --output-dir "outputs/puppy_cat_pop_art/" \
-  --seed 0
-```
-
-| View 1 (Cat) | View 2 (Puppy) |
-|:---:|:---:|
-| ![Cat](diffusers/outputs/puppy_cat_pop_art/generated_image1.png) | ![Puppy](diffusers/outputs/puppy_cat_pop_art/generated_image2.png) |
-
----
 
 ### Jigsaw Transform: Einstein ↔ Marilyn (Pop Art)
 
@@ -162,8 +119,40 @@ The method uses **Laplacian Pyramid Warping** to blend two diffusion trajectorie
 
 The result is a single image where applying the inverse transform reveals the second prompt.
 
+For more details please see the explanation [on my website (to be added)]() or the [original paper](https://arxiv.org/abs/2504.08902)
+
 ---
 
-## License
+## Citations
 
-This project is for research purposes. Please see the original paper for licensing details.
+If you use this code, please cite the original papers. We thank the authors for their work:
+
+**LookingGlass (Laplacian Pyramid Warping method):**
+
+```bibtex
+@misc{chang2025lookingglassgenerativeanamorphoseslaplacian,
+      title={LookingGlass: Generative Anamorphoses via Laplacian Pyramid Warping}, 
+      author={Pascal Chang and Sergio Sancho and Jingwei Tang and Markus Gross and Vinicius C. Azevedo},
+      year={2025},
+      eprint={2504.08902},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2504.08902}, 
+}
+```
+
+**Visual Anagrams (Jigsaw transform):**
+
+```bibtex
+@inproceedings{geng2024visualanagrams,
+      title={Visual Anagrams: Generating Multi-View Optical Illusions with Diffusion Models},
+      author={Daniel Geng and Inbum Park and Andrew Owens},
+      booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+      year={2024},
+      eprint={2311.17919},
+      archivePrefix={arXiv},
+      url={https://arxiv.org/abs/2311.17919},
+}
+```
+
+
