@@ -889,6 +889,9 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         elif mode == '135degree':
             # For 135 degree circular rotation, use apply_laplacian_warp
             return self.apply_laplacian_warp(noise_sample, transform_type='135degree', inverse=False)
+        elif mode == 'jigsaw':
+            # For jigsaw puzzle, use apply_laplacian_warp
+            return self.apply_laplacian_warp(noise_sample, transform_type='jigsaw', inverse=False)
         else:
             return noise_sample
         
@@ -902,6 +905,9 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         elif mode == '135degree':
             # For 135 degree circular rotation, use apply_laplacian_warp with inverse
             return self.apply_laplacian_warp(noise_sample, transform_type='135degree', inverse=True)
+        elif mode == 'jigsaw':
+            # For jigsaw puzzle, use apply_laplacian_warp with inverse
+            return self.apply_laplacian_warp(noise_sample, transform_type='jigsaw', inverse=True)
         else:
             return noise_sample
  
@@ -954,6 +960,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         skip_layer_guidance_start: float = 0.01,
         mu: Optional[float] = None,
         transform_type: Optional[str] = None,
+        jigsaw_seed: Optional[int] = 42,
         time_travel: Optional[int] = 1,
         time_travel_range: Optional[List[int]] = [20,80],
         denoise_last=False,
@@ -1249,6 +1256,9 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             else:
                 self._joint_attention_kwargs.update(ip_adapter_image_embeds=ip_adapter_image_embeds)
 
+        # Store jigsaw seed for use in apply_laplacian_warp
+        self._jigsaw_seed = jigsaw_seed
+        
         start_time_travel_step = int(num_inference_steps*(time_travel_range[0]/100))
         end_time_travel_step = int(num_inference_steps*(time_travel_range[1]/100))
         time_travel_range = list(range(start_time_travel_step,end_time_travel_step))
@@ -1496,6 +1506,21 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             # 135 degree rotation in a circular region
             angle = -135.0 if inverse else 135.0
             warp, mask = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
+            
+        elif transform_type == "jigsaw":
+            # Jigsaw puzzle permutation
+            from .lod_new import create_jigsaw_warp
+            # Use a fixed seed for reproducibility within the same generation
+            jigsaw_seed = getattr(self, '_jigsaw_seed', 42)
+            # Cache jigsaw warps to avoid recomputing every step
+            cache = getattr(self, "_jigsaw_warp_cache", {})
+            cache_key = (h, w, jigsaw_seed)
+            if cache_key not in cache:
+                warp_fwd = create_jigsaw_warp(h, w, seed=jigsaw_seed, inverse=False)
+                warp_inv = create_jigsaw_warp(h, w, seed=jigsaw_seed, inverse=True)
+                cache[cache_key] = (warp_fwd, warp_inv)
+                self._jigsaw_warp_cache = cache
+            warp = cache[cache_key][1 if inverse else 0]
             
         else:
             # Default to identity if unknown

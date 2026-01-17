@@ -6,18 +6,18 @@ pipe = StableDiffusion3Pipeline.from_pretrained(
 ).to("cuda")
 
 #transform_type = "vertical"
-possible_transform_types = ["vertical", "90degree", "135degree"]
+possible_transform_types = ["vertical", "90degree", "135degree", "jigsaw"]
 
-transform_type = "135degree"
+transform_type = "jigsaw"
 
 assert transform_type in possible_transform_types, f"Transform type must be one of {possible_transform_types}"
 
-style_prompt = "a an oil painting of "
+style_prompt = "a cinematic rendering of "
 seed = 0
 
 image1,image2 = pipe(
-    prompt=f"{style_prompt} a ship",
-    prompt_image2=f"{style_prompt} a village in the mountains",
+    prompt=f"{style_prompt} an icy cave with stalactites",
+    prompt_image2=f"{style_prompt} a parot",
     negative_prompt="",
     num_inference_steps=30,
     height=1024,

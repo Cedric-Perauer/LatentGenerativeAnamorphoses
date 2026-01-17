@@ -7,12 +7,251 @@ This module implements:
 - Forward warping (view) using 3D grid sampling across pyramid levels
 - Backward/inverse warping using backpropagation
 - Pyramid blending with partial views and detail-preserving averaging
+- Jigsaw puzzle permutation for visual anagrams
 """
 
 import torch
 import torch.nn.functional as F
 import scipy.ndimage
 import numpy as np
+
+
+# =============================================================================
+# Jigsaw Puzzle Permutation
+# =============================================================================
+
+def get_inv_perm(perm):
+    """
+    Get the inverse permutation of a permutation.
+    perm[perm_inv] = perm_inv[perm] = arange(len(perm))
+    """
+    perm_inv = torch.empty_like(perm)
+    perm_inv[perm] = torch.arange(len(perm))
+    return perm_inv
+
+
+def get_jigsaw_pieces(size):
+    """
+    Load all 16 jigsaw puzzle piece masks from PNG files.
+    
+    The pieces are arranged as:
+        c0 e0 f0 c1
+        f3 i0 i1 e1
+        e3 i3 i2 f1
+        c3 f2 e2 c2
+    
+    where c=corner, i=inner, e=edge1, f=edge2
+    
+    Args:
+        size: Image size (64, 256, or 1024)
+    
+    Returns:
+        pieces: numpy array of shape (16, size, size) with binary masks
+    """
+    from pathlib import Path
+    from PIL import Image
+    
+    # Location of pieces - relative to the diffusers directory
+    piece_dir = Path(__file__).parent.parent.parent.parent.parent / 'puzzle_4x4'
+    
+    def load_pieces(path):
+        """Load a piece and return all 4 rotations."""
+        piece = Image.open(path)
+        piece = np.array(piece)
+        # Handle different image formats
+        if piece.ndim == 3:
+            piece = piece[:, :, 0]
+        piece = (piece > 127).astype(np.float32)
+        pieces = np.stack([np.rot90(piece, k=-i) for i in range(4)])
+        return pieces
+    
+    # Load pieces and rotate to get 16 pieces total
+    pieces_corner = load_pieces(piece_dir / f'4x4_corner_{size}.png')
+    pieces_inner = load_pieces(piece_dir / f'4x4_inner_{size}.png')
+    pieces_edge1 = load_pieces(piece_dir / f'4x4_edge1_{size}.png')
+    pieces_edge2 = load_pieces(piece_dir / f'4x4_edge2_{size}.png')
+    
+    # Concatenate in order: corner, inner, edge1, edge2
+    pieces = np.concatenate([pieces_corner, pieces_inner, pieces_edge1, pieces_edge2])
+    
+    return pieces
+
+
+def make_jigsaw_perm(size, seed=42):
+    """
+    Create a jigsaw puzzle permutation using proper interlocking pieces.
+    
+    Based on the visual_anagrams paper implementation.
+    
+    Args:
+        size: Image size (64, 256, or 1024)
+        seed: Random seed for reproducible permutation
+    
+    Returns:
+        perm: Pixel permutation tensor of shape (size*size,)
+        piece_info: Tuple of (piece_perms, edge_swaps)
+    """
+    np.random.seed(seed)
+    
+    # Get random permutations for each piece type (groups of 4)
+    identity = np.arange(4)
+    perm_corner = np.random.permutation(identity)
+    perm_inner = np.random.permutation(identity)
+    perm_edge1 = np.random.permutation(identity)
+    perm_edge2 = np.random.permutation(identity)
+    edge_swaps = np.random.randint(2, size=4)
+    piece_perms = np.concatenate([perm_corner, perm_inner, perm_edge1, perm_edge2])
+    
+    # Load the 16 jigsaw piece masks
+    pieces = get_jigsaw_pieces(size)
+    
+    # Build pixel permutation
+    perm = []
+    
+    for y in range(size):
+        for x in range(size):
+            # Figure out which piece (x, y) is in
+            piece_idx = pieces[:, y, x].argmax()
+            
+            # Figure out rotation index (which rotation of the base piece)
+            rot_idx = piece_idx % 4
+            
+            # Get destination rotation from permutation
+            dest_rot_idx = piece_perms[piece_idx]
+            angle = (dest_rot_idx - rot_idx) * 90 / 180 * np.pi
+            
+            # Center coordinates on origin
+            cx = x - (size - 1) / 2.0
+            cy = y - (size - 1) / 2.0
+            
+            # Perform rotation
+            nx = np.cos(angle) * cx - np.sin(angle) * cy
+            ny = np.sin(angle) * cx + np.cos(angle) * cy
+            
+            # Translate back and round to nearest integer
+            nx = nx + (size - 1) / 2.0
+            ny = ny + (size - 1) / 2.0
+            nx = int(np.rint(nx))
+            ny = int(np.rint(ny))
+            
+            # Clamp to valid range
+            nx = max(0, min(size - 1, nx))
+            ny = max(0, min(size - 1, ny))
+            
+            # Perform swap if piece is an edge and swap is enabled
+            new_piece_idx = pieces[:, ny, nx].argmax()
+            edge_idx = new_piece_idx % 4
+            if new_piece_idx >= 8 and edge_swaps[edge_idx] == 1:
+                is_f_edge = (new_piece_idx - 8) // 4  # 1 if edge2, 0 if edge1
+                edge_type_parity = 1 - 2 * is_f_edge
+                rotation_parity = 1 - 2 * (edge_idx // 2)
+                swap_dist = size // 4
+                
+                # Swap in x or y direction based on edge index
+                if edge_idx % 2 == 0:
+                    nx = nx + swap_dist * edge_type_parity * rotation_parity
+                else:
+                    ny = ny + swap_dist * edge_type_parity * rotation_parity
+                
+                # Clamp again - ensure strictly within bounds
+                nx = max(0, min(size - 1, nx))
+                ny = max(0, min(size - 1, ny))
+            
+            # Append new index to permutation - ensure within bounds
+            new_idx = int(ny * size + nx)
+            new_idx = max(0, min(size * size - 1, new_idx))
+            perm.append(new_idx)
+    
+    return torch.tensor(perm), (piece_perms, edge_swaps)
+
+
+def create_jigsaw_warp(height, width, seed=42, inverse=False):
+    """
+    Create a warp field for jigsaw puzzle transformation.
+    
+    Uses proper interlocking jigsaw pieces loaded from mask files.
+    Works by creating the permutation at mask resolution, then scaling.
+    
+    Args:
+        height: Image height
+        width: Image width (should equal height)
+        seed: Random seed for reproducible permutation
+        inverse: If True, create the inverse (unshuffling) warp
+    
+    Returns:
+        warp: (1, 3, H, W) warp field with normalized UV coordinates [0, 1]
+    """
+    assert height == width, "Jigsaw requires square images"
+    size = height
+    
+    # Map to nearest supported size for piece masks
+    if size <= 64:
+        mask_size = 64
+    elif size <= 256:
+        mask_size = 256
+    else:
+        mask_size = 1024
+    
+    # Get the pixel permutation at mask resolution
+    perm, _ = make_jigsaw_perm(mask_size, seed=seed)
+    
+    # Convert permutation to normalized source coordinates [0, 1]
+    # This way we can scale to any target size
+    src_y_norm = (perm // mask_size).float() / (mask_size - 1)
+    src_x_norm = (perm % mask_size).float() / (mask_size - 1)
+    
+    # Reshape to 2D at mask resolution
+    src_y_norm = src_y_norm.view(mask_size, mask_size)
+    src_x_norm = src_x_norm.view(mask_size, mask_size)
+    
+    # Resize to target size if needed
+    if size != mask_size:
+        src_y_norm = F.interpolate(
+            src_y_norm.unsqueeze(0).unsqueeze(0), 
+            size=(size, size), 
+            mode='nearest'
+        ).squeeze()
+        src_x_norm = F.interpolate(
+            src_x_norm.unsqueeze(0).unsqueeze(0), 
+            size=(size, size), 
+            mode='nearest'
+        ).squeeze()
+    
+    if inverse:
+        # For inverse, we need to create the inverse mapping
+        # The forward warp tells us: for each dest pixel, where to sample from
+        # For inverse, we need: for each source pixel, where it goes to
+        
+        # Discretize the source coordinates
+        src_y_idx = (src_y_norm * (size - 1)).round().long().clamp(0, size - 1)
+        src_x_idx = (src_x_norm * (size - 1)).round().long().clamp(0, size - 1)
+        
+        # Create destination coordinate grids (normalized)
+        dy_grid = torch.arange(size).float().view(-1, 1).expand(size, size) / (size - 1)
+        dx_grid = torch.arange(size).float().view(1, -1).expand(size, size) / (size - 1)
+        
+        # Flatten for scatter
+        src_flat = src_y_idx.flatten() * size + src_x_idx.flatten()
+        
+        # Create inverse mapping using scatter
+        inv_y = torch.zeros(size * size)
+        inv_x = torch.zeros(size * size)
+        
+        inv_y.scatter_(0, src_flat, dy_grid.flatten())
+        inv_x.scatter_(0, src_flat, dx_grid.flatten())
+        
+        src_y_norm = inv_y.view(size, size)
+        src_x_norm = inv_x.view(size, size)
+    
+    # Clamp to valid range
+    src_y_norm = src_y_norm.clamp(0, 1)
+    src_x_norm = src_x_norm.clamp(0, 1)
+    
+    warp = torch.stack([src_x_norm, src_y_norm], dim=0).unsqueeze(0)  # (1, 2, H, W)
+    third_channel = torch.zeros(1, 1, size, size)
+    warp = torch.cat([warp, third_channel], dim=1)  # (1, 3, H, W)
+    
+    return warp
 
 
 # =============================================================================
