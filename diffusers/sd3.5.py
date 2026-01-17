@@ -1,3 +1,5 @@
+import argparse
+import os
 import torch
 from diffusers import StableDiffusion3Pipeline
 
@@ -6,18 +8,29 @@ pipe = StableDiffusion3Pipeline.from_pretrained(
 ).to("cuda")
 
 #transform_type = "vertical"
-possible_transform_types = ["vertical", "90degree", "135degree", "jigsaw"]
+possible_transform_types = ["vertical", "horizontal", "90rot", "135rot", "180rot", "jigsaw"]
 
-transform_type = "jigsaw"
+parser = argparse.ArgumentParser(description="Generate SD3.5 dual prompts with a shared style.")
+parser.add_argument("--style-prompt", default="a pop art of ", help="Style prefix applied to both prompts.")
+parser.add_argument("--prompt1", default="albert einstein", help="First subject prompt.")
+parser.add_argument("--prompt2", default="marilyn monroe", help="Second subject prompt.")
+parser.add_argument("--output-dir", default=".", help="Directory to save generated images.")
+parser.add_argument(
+    "--transform",
+    default="jigsaw",
+    choices=possible_transform_types,
+    help="Anamorphosis transform type to apply.",
+)
+parser.add_argument("--seed", type=int, default=1, help="Random seed for generation.")
+args = parser.parse_args()
 
-assert transform_type in possible_transform_types, f"Transform type must be one of {possible_transform_types}"
+style_prompt = args.style_prompt
+transform_type = args.transform
+seed = args.seed
 
-style_prompt = "a cinematic rendering of "
-seed = 0
-
-image1,image2 = pipe(
-    prompt=f"{style_prompt} an icy cave with stalactites",
-    prompt_image2=f"{style_prompt} a parot",
+image1, image2 = pipe(
+    prompt=f"{style_prompt} {args.prompt1}",
+    prompt_image2=f"{style_prompt} {args.prompt2}",
     negative_prompt="",
     num_inference_steps=30,
     height=1024,
@@ -33,6 +46,7 @@ image1,image2 = pipe(
     lwp=True,
 )
 
-image1.save("generated_image1.png")
-image2.save("generated_image2.png")
+os.makedirs(args.output_dir, exist_ok=True)
+image1.save(os.path.join(args.output_dir, "generated_image1.png"))
+image2.save(os.path.join(args.output_dir, "generated_image2.png"))
 

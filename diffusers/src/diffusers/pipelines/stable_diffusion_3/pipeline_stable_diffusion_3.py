@@ -884,11 +884,9 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             return torch.flip(noise_sample, [3])
         elif mode == 'vertical':
             return torch.flip(noise_sample, [2])
-        elif mode == '90degree':
-            return torch.rot90(noise_sample, 1, [2, 3])
-        elif mode == '135degree':
-            # For 135 degree circular rotation, use apply_laplacian_warp
-            return self.apply_laplacian_warp(noise_sample, transform_type='135degree', inverse=False)
+        elif mode in ('90rot', '135rot', '180rot'):
+            # Use circular rotation warp for rotation transforms
+            return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=False)
         elif mode == 'jigsaw':
             # For jigsaw puzzle, use apply_laplacian_warp
             return self.apply_laplacian_warp(noise_sample, transform_type='jigsaw', inverse=False)
@@ -900,11 +898,9 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             return torch.flip(noise_sample, [3])
         elif mode == 'vertical':
             return torch.flip(noise_sample, [2])
-        elif mode == '90degree':
-            return torch.rot90(noise_sample, -1, [2, 3])
-        elif mode == '135degree':
-            # For 135 degree circular rotation, use apply_laplacian_warp with inverse
-            return self.apply_laplacian_warp(noise_sample, transform_type='135degree', inverse=True)
+        elif mode in ('90rot', '135rot', '180rot'):
+            # Use circular rotation warp with inverse for rotation transforms
+            return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=True)
         elif mode == 'jigsaw':
             # For jigsaw puzzle, use apply_laplacian_warp with inverse
             return self.apply_laplacian_warp(noise_sample, transform_type='jigsaw', inverse=True)
@@ -1466,7 +1462,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         
         Args:
             image: Image tensor (B, C, H, W)
-            transform_type: Type of transform ("vertical", "90degree", "135degree", etc.)
+            transform_type: Type of transform ("vertical", "horizontal", "90rot", "135rot", "180rot", "jigsaw")
             inverse: Whether to apply inverse warp
         
         Returns:
@@ -1483,28 +1479,29 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         if transform_type == "vertical":
             warp = create_vertical_flip_warp(h, w)
             
-        elif transform_type == "90degree":
-            # Create coordinate grids
+        elif transform_type == "horizontal":
+            # Horizontal flip warp
             v_coords = torch.linspace(0, 1, h).view(-1, 1).expand(h, w)
             u_coords = torch.linspace(0, 1, w).view(1, -1).expand(h, w)
-            
-            if inverse:
-                # Inverse rotation (CW): u_src = v, v_src = 1-u
-                warp_u = v_coords
-                warp_v = 1.0 - u_coords
-            else:
-                # Forward rotation (CCW): u_src = 1-v, v_src = u
-                warp_u = 1.0 - v_coords
-                warp_v = u_coords
-            
+            warp_u = 1.0 - u_coords  # flip horizontally
+            warp_v = v_coords
             warp = torch.stack([warp_u, warp_v], dim=0).unsqueeze(0)
-            # Add third channel for compatibility with lod functions
             third_channel = torch.zeros(1, 1, h, w)
             warp = torch.cat([warp, third_channel], dim=1)
             
-        elif transform_type == "135degree":
+        elif transform_type == "90rot":
+            # 90 degree rotation in a circular region
+            angle = -90.0 if inverse else 90.0
+            warp, mask = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
+            
+        elif transform_type == "135rot":
             # 135 degree rotation in a circular region
             angle = -135.0 if inverse else 135.0
+            warp, mask = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
+            
+        elif transform_type == "180rot":
+            # 180 degree rotation in a circular region
+            angle = -180.0 if inverse else 180.0
             warp, mask = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
             
         elif transform_type == "jigsaw":
