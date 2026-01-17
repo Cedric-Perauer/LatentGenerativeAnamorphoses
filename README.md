@@ -9,7 +9,7 @@ This project generates **anamorphic images** — single images that reveal diffe
 
 | Jigsaw Puzzle : View 1 (Cat) | Jigsaw Puzzle : View 2 (Puppy) |
 |:---:|:---:|
-| ![Cat](diffusers/outputs/puppy_cat_pop_art/generated_image1.png) | ![Puppy](diffusers/outputs/puppy_cat_pop_art/generated_image2.png) |
+| <img src="diffusers/outputs/puppy_cat_pop_art/generated_image1.png" width="512"/> | <img src="diffusers/outputs/puppy_cat_pop_art/generated_image2.png" width="512"/> |
 
 
 ## Installation
@@ -76,7 +76,7 @@ python sd3.5.py \
 
 | View 1 (Einstein) | View 2 (Marilyn) |
 |:---:|:---:|
-| ![Einstein](diffusers/outputs/einstein_marilyn/generated_image1.png) | ![Marilyn](diffusers/outputs/einstein_marilyn/generated_image2.png) |
+| <img src="diffusers/outputs/einstein_marilyn/generated_image1.png" width="512"/> | <img src="diffusers/outputs/einstein_marilyn/generated_image2.png" width="512"/> |
 
 ---
 
@@ -88,7 +88,7 @@ python sd3.5.py \
 
 | View 1 (Fruit) | View 2 (Gorilla) |
 |:---:|:---:|
-| ![Fruit](diffusers/outputs/fruit_gorilla/generated_image1.png) | ![Gorilla](diffusers/outputs/fruit_gorilla/generated_image2.png) |
+| <img src="diffusers/outputs/fruit_gorilla/generated_image1.png" width="512"/> | <img src="diffusers/outputs/fruit_gorilla/generated_image2.png" width="512"/> |
 
 ---
 
@@ -100,7 +100,7 @@ python sd3.5.py \
 
 | View 1 (Village) | View 2 (Horse) |
 |:---:|:---:|
-| ![Fruit](diffusers/outputs/horse_village/generated_image1.png) | ![Gorilla](diffusers/outputs/horse_village/generated_image2.png) |
+| <img src="diffusers/outputs/horse_village/generated_image1.png" width="512"/> | <img src="diffusers/outputs/horse_village/generated_image2.png" width="512"/> |
 
 
 ### Jigsaw puzzle transform: Puppy ↔ Cat 
@@ -111,7 +111,7 @@ python sd3.5.py \
 
 | View 1 (Puppy) | View 2 (Cat) |
 |:---:|:---:|
-| ![Ship](diffusers/outputs/jigsaw/puppy.png) | ![Village](diffusers/outputs/jigsaw/cat.png) |
+| <img src="diffusers/outputs/jigsaw/puppy.png" width="512"/> | <img src="diffusers/outputs/jigsaw/cat.png" width="512"/> |
 
 
 
@@ -123,7 +123,7 @@ python sd3.5.py \
 
 | View 1 (Ship) | View 2 (Village) |
 |:---:|:---:|
-| ![Ship](diffusers/outputs/ship_town/generated_image1_3.png) | ![Village](diffusers/outputs/ship_town/generated_image2_3.png) |
+| <img src="diffusers/outputs/ship_town/generated_image1_3.png" width="512"/> | <img src="diffusers/outputs/ship_town/generated_image2_3.png" width="512"/> |
 
 ### Jigsaw puzzle transform: Flowers ↔ Bird 
 
@@ -133,7 +133,7 @@ python sd3.5.py \
 
 | View 1 (Flowers) | View 2 (Bird) |
 |:---:|:---:|
-| ![Ship](diffusers/outputs/jigsaw/generated_image1_flowers.png) | ![Village](diffusers/outputs/jigsaw/generated_image2_flowers.png) |
+| <img src="diffusers/outputs/jigsaw/generated_image1_flowers.png" width="512"/> | <img src="diffusers/outputs/jigsaw/generated_image2_flowers.png" width="512"/> |
 
 
 
@@ -145,7 +145,7 @@ python sd3.5.py \
 
 | View 1 (Cave) | View 2 (Parrot) |
 |:---:|:---:|
-| ![Ship](diffusers/outputs/parrot_cave/generated_image1.png) | ![Village](diffusers/outputs/parrot_cave/generated_image2.png) |
+| <img src="diffusers/outputs/parrot_cave/generated_image1.png" width="512"/> | <img src="diffusers/outputs/parrot_cave/generated_image2.png" width="512"/> |
 
 
 ### 90 degree rotation transform: Man ↔ Camp Fire 
@@ -156,7 +156,7 @@ python sd3.5.py \
 
 | View 1 (Man) | View 2 (Camp Fire) |
 |:---:|:---:|
-| ![Ship](diffusers/outputs/man_campfire/generated_image1.png) | ![Village](diffusers/outputs/man_campfire/generated_image2.png) |
+| <img src="diffusers/outputs/man_campfire/generated_image1.png" width="512"/> | <img src="diffusers/outputs/man_campfire/generated_image2.png" width="512"/> |
 
 
 
