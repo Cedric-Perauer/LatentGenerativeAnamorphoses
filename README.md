@@ -1,6 +1,6 @@
 # Latent Generative Anamorphoses 
 
-An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5, inspired by the [LookingGlass](https://arxiv.org/abs/2504.08902) paper [CVPR2025].
+An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5, inspired by the [LookingGlass paper, Chang et. al.](https://arxiv.org/abs/2504.08902) [CVPR 2025].
 
 This project generates **anamorphic images** — single images that reveal different content when viewed from different perspectives or transformations. For example, an image that looks like Einstein when viewed normally, but reveals Marilyn Monroe when rotated or rearranged.
 
@@ -166,19 +166,7 @@ python sd3.5.py \
 
 ---
 
-## How It Works
-
-The method uses **Laplacian Pyramid Warping** to blend two diffusion trajectories:
-
-1. **Dual Prompt Encoding**: Encode both prompts separately
-2. **Parallel Denoising**: Denoise two latent paths simultaneously  
-3. **Transform & Blend**: Apply geometric transform to one view, blend using Laplacian pyramids
-4. **Time Travel**: Re-noise and re-denoise for better coherence
-5. **Final Decode**: Decode the blended latent to produce the anamorphic image
-
-The result is a single image where applying the inverse transform reveals the second prompt.
-
-For more details please see the explanation [on my website (to be added)]() or the [original paper](https://arxiv.org/abs/2504.08902)
+For more details please see the explanation [here](https://cedric-perauer.github.io/projects/latentanamorpheses/) and refer to [the original paper](https://arxiv.org/abs/2504.08902)
 
 ---
 
