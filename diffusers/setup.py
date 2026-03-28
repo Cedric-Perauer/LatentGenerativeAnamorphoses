@@ -273,7 +273,7 @@ setup(
     name="diffusers",
     version="0.36.0.dev0",  # expected format is one of x.y.z.dev0, or x.y.z.rc1 or x.y.z (no to dashes, yes to dots)
     description="State-of-the-art diffusion in PyTorch and JAX.",
-    long_description=open("README.md", "r", encoding="utf-8").read(),
+    long_description=open("README.md", "r", encoding="utf-8").read() if os.path.exists("README.md") else "",
     long_description_content_type="text/markdown",
     keywords="deep learning diffusion jax pytorch stable diffusion audioldm",
     license="Apache 2.0 License",
