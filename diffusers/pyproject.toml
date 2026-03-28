@@ -1,3 +1,38 @@
+[project]
+name = "diffusers"
+version = "0.36.0.dev0"
+description = "State-of-the-art diffusion in PyTorch and JAX."
+requires-python = ">=3.8.0"
+
+dependencies = [
+    # Core dependencies (from setup.py install_requires, updated to installed versions)
+    "Pillow>=12.1.1",
+    "filelock>=3.25.2",
+    "huggingface-hub>=1.8.0",
+    "importlib_metadata>=9.0.0",
+    "numpy>=2.4.3",
+    "regex>=2026.2.28",
+    "requests>=2.33.0",
+    "safetensors>=0.7.0",
+
+    # Packages installed but missing from setup.py
+    "packaging>=25.0",
+    "psutil>=7.2.2",
+    "PyYAML>=6.0.3",
+    "tqdm>=4.67.3",
+
+    # ML/DL dependencies (installed, with updated versions vs setup.py)
+    "accelerate>=1.13.0",
+    "Jinja2>=3.1.6",
+    "scipy>=1.17.1",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "transformers>=5.4.0",
+
+    # Updated from setup.py (was urllib3<=2.0.0, but 2.6.3 is installed)
+    "urllib3>=2.6.3",
+]
+
 [tool.ruff]
 line-length = 119
 

@@ -36,7 +36,7 @@ python sd3.5.py \
   --prompt1 "a cat" \
   --prompt2 "a puppy" \
   --transform jigsaw \
-  --output-dir "outputs/einstein_marilyn/" \
+  --output-dir "outputs/cat_puppy/" \
   --seed 1
 ```
 
