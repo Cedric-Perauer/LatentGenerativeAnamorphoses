@@ -1,6 +1,6 @@
 # Latent Generative Anamorphoses 
 
-An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5, inspired by the [LookingGlass paper, Chang et. al.](https://arxiv.org/abs/2504.08902) [CVPR 2025].
+An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5 medium (and optionally Flux2.dev), inspired by the [LookingGlass paper, Chang et. al.](https://arxiv.org/abs/2504.08902) [CVPR 2025].
 
 This project generates **anamorphic images** — single images that reveal different content when viewed from different perspectives or transformations. For example, an image that looks like Einstein when viewed normally, but reveals Marilyn Monroe when rotated or rearranged.
 
@@ -24,7 +24,13 @@ pip install -e diffusers/
 pip install torch transformers accelerate
 ```
 
+## Requirements
+
+We tested SD3.5 on RTX 4090 and Flux2.dev version on RTX Pro 6000 gpu. Running the Flux2.dev script requires about 37GB of VRAM with the current script. 
+
 ## Usage
+
+For SD3.5 make sure to accept the license request [here](https://huggingface.co/stabilityai/stable-diffusion-3.5-medium) and login in your terminal with `hf auth login`.
 
 Navigate to the `diffusers/` directory and run:
 
@@ -38,6 +44,25 @@ python sd3.5.py \
   --transform jigsaw \
   --output-dir "outputs/cat_puppy/" \
   --seed 1
+```
+
+For Flux2.dev make sure to accept the license request [here](https://huggingface.co/black-forest-labs/FLUX.2-dev) and login in your terminal with `hf auth login`. 
+We note that the original paper and our reimplementation is based on SD3.5 medium, so Flux2.dev inference is less well tested. 
+
+For optional Flux2.dev inference run : 
+
+```
+```bash
+cd diffusers
+
+python flux2_dev.py \
+  --style-prompt "a pop art of" \
+  --prompt1 "a cat" \
+  --prompt2 "a puppy" \
+  --transform jigsaw \
+  --output-dir "outputs_flux2/cat_puppy/" \
+  --seed 1
+```
 ```
 
 ### Command-Line Arguments
