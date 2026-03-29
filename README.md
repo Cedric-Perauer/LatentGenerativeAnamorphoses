@@ -76,7 +76,7 @@ python sd3.5.py \
 
 | View 1 (Einstein) | View 2 (Marilyn) |
 |:---:|:---:|
-| <img src="diffusers/outputs/einstein_marilyn/generated_image1.png" width="512"/> | <img src="diffusers/outputs/einstein_marilyn/generated_image2.png" width="512"/> |
+| <img src="diffusers/outputs/einstein_marilyn2/generated_image1.png" width="512"/> | <img src="diffusers/outputs/einstein_marilyn2/generated_image2.png" width="512"/> |
 
 ---
 
