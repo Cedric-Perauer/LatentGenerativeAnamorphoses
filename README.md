@@ -51,7 +51,7 @@ We note that the original paper and our reimplementation is based on SD3.5 mediu
 
 For optional Flux2.dev inference run : 
 
-```
+
 ```bash
 cd diffusers
 
@@ -62,7 +62,6 @@ python flux2_dev.py \
   --transform jigsaw \
   --output-dir "outputs_flux2/cat_puppy/" \
   --seed 1
-```
 ```
 
 ### Command-Line Arguments
