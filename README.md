@@ -26,7 +26,7 @@ pip install torch transformers accelerate
 
 ## Requirements
 
-We tested SD3.5 on RTX 4090 and Flux2.dev version on RTX Pro 6000 gpu. Running the Flux2.dev script requires about 37GB of VRAM with the current script. 
+We tested SD3.5 on an RTX 4090. The Flux scripts are less well tested than the SD3.5 version. `flux1_dev.py` requires about **37GB of VRAM** and `flux2_dev.py` requires about **68GB of VRAM**. We tested the Flux scripts on an RTX Pro 6000 GPU.
 
 ## Usage
 
@@ -46,11 +46,26 @@ python sd3.5.py \
   --seed 1
 ```
 
-For Flux2.dev make sure to accept the license request [here](https://huggingface.co/black-forest-labs/FLUX.2-dev) and login in your terminal with `hf auth login`. 
-We note that the original paper and our reimplementation is based on SD3.5 medium, so Flux2.dev inference is less well tested. 
+For Flux1.dev make sure to accept the license request [here](https://huggingface.co/black-forest-labs/FLUX.1-dev) and login in your terminal with `hf auth login`.
+We note that the original paper and our reimplementation is based on SD3.5 medium, so Flux inference is less well tested.
 
-For optional Flux2.dev inference run : 
+For optional Flux1.dev inference run:
 
+```bash
+cd diffusers
+
+python flux1_dev.py \
+  --style-prompt "a pop art of" \
+  --prompt1 "a cat" \
+  --prompt2 "a puppy" \
+  --transform jigsaw \
+  --output-dir "outputs_flux1/cat_puppy/" \
+  --seed 1
+```
+
+For Flux2.dev make sure to accept the license request [here](https://huggingface.co/black-forest-labs/FLUX.2-dev) and login in your terminal with `hf auth login`.
+
+For optional Flux2.dev inference run:
 
 ```bash
 cd diffusers
