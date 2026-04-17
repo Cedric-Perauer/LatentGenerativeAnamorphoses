@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(ls /root/LatentGenerativeAnamorphoses/diffusers/src/diffusers/utils/dummy_*_objects.py)",
+      "Bash(xargs -I{} basename {} .py)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)"
+    ]
+  }
+}

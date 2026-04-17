@@ -705,6 +705,8 @@ class Flux2Pipeline(DiffusionPipeline):
             return torch.flip(noise_sample, [3])
         elif mode == 'vertical':
             return torch.flip(noise_sample, [2])
+        elif mode == '90flip':
+            return torch.rot90(noise_sample, 1, [2, 3])
         elif mode in ('90rot', '135rot', '180rot'):
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=False)
         elif mode == 'jigsaw':
@@ -717,6 +719,8 @@ class Flux2Pipeline(DiffusionPipeline):
             return torch.flip(noise_sample, [3])
         elif mode == 'vertical':
             return torch.flip(noise_sample, [2])
+        elif mode == '90flip':
+            return torch.rot90(noise_sample, -1, [2, 3])
         elif mode in ('90rot', '135rot', '180rot'):
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=True)
         elif mode == 'jigsaw':
@@ -730,6 +734,11 @@ class Flux2Pipeline(DiffusionPipeline):
 
         b, c, h, w = image.shape
         mask = None
+
+        if transform_type == "90flip":
+            self._current_warp_mask = None
+            k = -1 if inverse else 1
+            return torch.rot90(image, k, [2, 3])
 
         if transform_type == "vertical":
             warp = create_vertical_flip_warp(h, w)
