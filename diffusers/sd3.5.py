@@ -8,7 +8,7 @@ pipe = StableDiffusion3Pipeline.from_pretrained(
 ).to("cuda")
 
 #transform_type = "vertical"
-possible_transform_types = ["vertical", "horizontal", "90rot", "135rot", "180rot", "jigsaw"]
+possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw"]
 
 parser = argparse.ArgumentParser(description="Generate SD3.5 dual prompts with a shared style.")
 parser.add_argument("--style-prompt", default="a pop art of ", help="Style prefix applied to both prompts.")

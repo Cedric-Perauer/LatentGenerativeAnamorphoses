@@ -26,7 +26,7 @@ pip install torch transformers accelerate
 
 ## Requirements
 
-We tested SD3.5 on an RTX 4090. The Flux scripts are less well tested than the SD3.5 version. `flux1_dev.py` requires about **37GB of VRAM** and `flux2_dev.py` requires about **68GB of VRAM**. We tested the Flux scripts on an RTX Pro 6000 GPU.
+We tested SD3.5 on an RTX 4090. The Flux scripts are less well tested than the SD3.5 version. `flux1_dev.py` requires about **37GB of VRAM** and `flux2_dev.py` requires about **68GB of VRAM** (all at 1024x1024 resolution). We tested the Flux scripts on an RTX Pro 6000 GPU.
 
 ## Usage
 
@@ -96,6 +96,7 @@ python flux2_dev.py \
 |-----------|-------------|
 | `vertical` | Vertical flip — image reveals second prompt when flipped upside-down |
 | `horizontal` | Horizontal flip — image reveals second prompt when mirrored left-right |
+| `90flip` | 90 degree flip — image reveals second prompt when image is flipped by 90 degree|
 | `90rot` | 90° circular rotation in center region |
 | `135rot` | 135° circular rotation in center region |
 | `180rot` | 180° circular rotation in center region |
