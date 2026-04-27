@@ -290,9 +290,11 @@ elif args.mode == 'inner_circle':
         # PIL rotates CCW for positive angles, around the image center by default
         rotated = np.array(img1_pil.rotate(angle, resample=Image.BICUBIC),
                            dtype=np.float32)
-        # Outer area cross-fades from img1 to img2 so we land exactly on image2 at t=1
+        # Inner and outer both cross-fade to image2 so we land exactly on image2
+        # at t=1 regardless of how many degrees the disk is animated through.
+        inner = (1.0 - t) * rotated + t * img2_f
         outer = (1.0 - t) * img1_f + t * img2_f
-        composed = rotated * disk_alpha + outer * (1.0 - disk_alpha)
+        composed = inner * disk_alpha + outer * (1.0 - disk_alpha)
         composed = np.clip(composed, 0.0, 255.0).astype(np.uint8)
 
         canvas = Image.new('RGB', (CANVAS_SIZE, CANVAS_SIZE), (255, 255, 255))
