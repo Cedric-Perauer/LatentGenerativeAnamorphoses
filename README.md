@@ -46,8 +46,18 @@ python sd3.5.py \
   --seed 1
 ```
 
+<details>
+  <summary><strong>Optional Flux1.dev and Flux2.dev inference (not working as well) </strong></summary>
+
+> **Note on Flux 1/2 support**  
+> In our experience, FLUX.1/2-dev currently perform worse than SD3.5 for these anamorphoses because:  
+> - The method and hyperparameters are tuned specifically for SD3.5 medium (noise schedule, warp timing, CFG, etc.), and we have not re-optimized them for Flux.  
+> - Flux uses a different latent space and VAE, so the Laplacian Pyramid Warping can potentially introduce more artifacts and loss of detail.  
+> - Flux models have different conditioning and guidance behavior (rectified flow + guidance distillation, and a VLM stack for FLUX.2), which can “fight” the intended anamorphic distortions.  
+
 For Flux1.dev make sure to accept the license request [here](https://huggingface.co/black-forest-labs/FLUX.1-dev) and login in your terminal with `hf auth login`.
-We note that the original paper and our reimplementation is based on SD3.5 medium, so Flux inference is less well tested.
+
+We note that the original paper and our reimplementation is based on SD3.5 medium, so Flux inference is not optimized, naively transferring the pipeline to Flux doesnt work well as our outputs below show : 
 
 For optional Flux1.dev inference run:
 
@@ -62,6 +72,12 @@ python flux1_dev.py \
   --output-dir "outputs_flux1/cat_puppy/" \
   --seed 1
 ```
+
+
+| Jigsaw Puzzle : View 1 (Cat) | Jigsaw Puzzle : View 2 (Puppy) |
+|:---:|:---:|
+| <img src="diffusers/outputs_flux1/puppy_cat/generated_image1.png" width="512"/> | <img src="diffusers/outputs_flux1/puppy_cat/generated_image2.png" width="512"/> |
+
 
 For Flux2.dev make sure to accept the license request [here](https://huggingface.co/black-forest-labs/FLUX.2-dev) and login in your terminal with `hf auth login`.
 
@@ -78,6 +94,15 @@ python flux2_dev.py \
   --output-dir "outputs_flux2/cat_puppy/" \
   --seed 1
 ```
+
+| Jigsaw Puzzle : View 1 (Cat) | Jigsaw Puzzle : View 2 (Puppy) |
+|:---:|:---:|
+| <img src="diffusers/outputs_flux2/cat_puppy/generated_image1.png" width="512"/> | <img src="diffusers/outputs_flux2/cat_puppy/generated_image2.png" width="512"/> |
+
+
+
+
+</details>
 
 ### Command-Line Arguments
 
