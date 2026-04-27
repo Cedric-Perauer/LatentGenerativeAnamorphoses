@@ -1,6 +1,6 @@
 # Latent Generative Anamorphoses 
 
-An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5 medium (and optionally Flux2.dev), inspired by the [LookingGlass paper, Chang et. al.](https://arxiv.org/abs/2504.08902) [CVPR 2025].
+An implementation of **2D latent generative anamorphoses** using Stable Diffusion 3.5 medium, inspired by the [LookingGlass paper, Chang et. al.](https://arxiv.org/abs/2504.08902) [CVPR 2025].
 
 This project generates **anamorphic images** — single images that reveal different content when viewed from different perspectives or transformations. For example, an image that looks like Einstein when viewed normally, but reveals Marilyn Monroe when rotated or rearranged.
 
