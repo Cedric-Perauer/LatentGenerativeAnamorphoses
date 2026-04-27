@@ -63,12 +63,12 @@ parser.add_argument('--caption1', type=str, default='',
                     help='Optional caption shown beneath image1 during the opening hold')
 parser.add_argument('--caption2', type=str, default='',
                     help='Optional caption shown beneath the final frame during the closing hold')
-parser.add_argument('--mode', choices=['jigsaw', 'inner_circle'], default='jigsaw',
+parser.add_argument('--mode', choices=['jigsaw', 'inner_circle', 'rotate'], default='jigsaw',
                     help='Which illusion type to animate')
 parser.add_argument('--rotation', type=float, default=90.0,
-                    help='[inner_circle] degrees to rotate the inner disk; +90 = 90° to the left (CCW)')
-parser.add_argument('--radius', type=int, default=IM_SIZE * 24 // 64,
-                    help='[inner_circle] radius of the rotating disk in pixels (default 384, matches r=24/size=64)')
+                    help='[inner_circle / rotate] degrees of rotation to animate; +90 = CCW ("to the left"), -90 = CW')
+parser.add_argument('--radius', type=int, default=None,
+                    help='[inner_circle] disk radius in px; auto-detected from img1↔img2 diff envelope when omitted')
 parser.add_argument('--feather', type=int, default=4,
                     help='[inner_circle] disk-edge feather radius in pixels for soft compositing')
 args = parser.parse_args()
@@ -259,6 +259,19 @@ if args.mode == 'jigsaw':
         return np.array(canvas_rgb)
 
 elif args.mode == 'inner_circle':
+    # Auto-detect the disk radius from where img1 and img2 actually differ —
+    # outside the manipulated disk the two images are bytewise identical.
+    if args.radius is None:
+        diff_max = np.abs(img1.astype(np.int16) - img2.astype(np.int16)).max(axis=-1)
+        cy = (IM_SIZE - 1) / 2.0
+        yy0, xx0 = np.indices((IM_SIZE, IM_SIZE), dtype=np.float32)
+        dist0 = np.sqrt((yy0 - cy) ** 2 + (xx0 - cy) ** 2)
+        if (diff_max > 0).any():
+            args.radius = int(np.ceil(dist0[diff_max > 0].max())) + 2
+        else:
+            args.radius = IM_SIZE // 2
+        print(f'Auto-detected inner-disk radius: {args.radius}px')
+
     # Feathered alpha mask: 1 inside the disk, 0 outside, smooth at the boundary
     cy = (IM_SIZE - 1) / 2.0
     cx = (IM_SIZE - 1) / 2.0
@@ -284,6 +297,42 @@ elif args.mode == 'inner_circle':
 
         canvas = Image.new('RGB', (CANVAS_SIZE, CANVAS_SIZE), (255, 255, 255))
         canvas.paste(Image.fromarray(composed), (img_offset, img_offset))
+        draw_caption(canvas, caption)
+        if OUT_SIZE != CANVAS_SIZE:
+            canvas = canvas.resize((OUT_SIZE, OUT_SIZE), Image.LANCZOS)
+        return np.array(canvas)
+
+elif args.mode == 'rotate':
+    # Whole-image rotation. Two layers — image1 rotated to current angle, image2
+    # rotated by (current angle - target rotation) — cross-faded so we anchor
+    # exactly on image1 at t=0 and image2 at t=1. For pixel-exact 90° pairs, the
+    # two layers agree at every intermediate angle so the cross-fade is invisible.
+    img1_pil = Image.fromarray(img1)
+    img2_pil = Image.fromarray(img2)
+
+    def _embed(img_pil):
+        canvas = Image.new('RGB', (CANVAS_SIZE, CANVAS_SIZE), (255, 255, 255))
+        canvas.paste(img_pil, (img_offset, img_offset))
+        return canvas
+
+    canvas1_template = _embed(img1_pil)
+    canvas2_template = _embed(img2_pil)
+    print(f'Rotate mode: full-image rotation of {args.rotation:+.1f}° '
+          f'(positive = CCW)')
+
+    def render_frame_at_t(t, caption=''):
+        angle = t * args.rotation
+        rot1 = np.array(canvas1_template.rotate(angle, resample=Image.BICUBIC,
+                                                fillcolor=(255, 255, 255)),
+                        dtype=np.float32)
+        rot2 = np.array(canvas2_template.rotate(angle - args.rotation,
+                                                resample=Image.BICUBIC,
+                                                fillcolor=(255, 255, 255)),
+                        dtype=np.float32)
+        composed = (1.0 - t) * rot1 + t * rot2
+        composed = np.clip(composed, 0.0, 255.0).astype(np.uint8)
+
+        canvas = Image.fromarray(composed)
         draw_caption(canvas, caption)
         if OUT_SIZE != CANVAS_SIZE:
             canvas = canvas.resize((OUT_SIZE, OUT_SIZE), Image.LANCZOS)
