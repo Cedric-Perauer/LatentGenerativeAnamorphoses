@@ -285,14 +285,24 @@ elif args.mode == 'inner_circle':
     print(f'Inner-circle mode: rotating disk r={args.radius}px by {args.rotation:+.1f}° '
           f'(positive = CCW), feather={args.feather}px')
 
+    # Inner cross-fade is delayed until the rotation has nearly finished, so the
+    # disk visibly rotates all the way through (the rotated cave stays visible)
+    # and only morphs into image2's content at the very end.
+    INNER_FADE_START = 0.85
+
     def render_frame_at_t(t, caption=''):
         angle = t * args.rotation
         # PIL rotates CCW for positive angles, around the image center by default
         rotated = np.array(img1_pil.rotate(angle, resample=Image.BICUBIC),
                            dtype=np.float32)
-        # Inner and outer both cross-fade to image2 so we land exactly on image2
-        # at t=1 regardless of how many degrees the disk is animated through.
-        inner = (1.0 - t) * rotated + t * img2_f
+        # Inner stays as the rotating image1 until INNER_FADE_START, then quickly
+        # cross-fades to image2's inner content
+        if t <= INNER_FADE_START:
+            inner_blend = 0.0
+        else:
+            inner_blend = smoothstep((t - INNER_FADE_START) /
+                                     max(1e-6, 1.0 - INNER_FADE_START))
+        inner = (1.0 - inner_blend) * rotated + inner_blend * img2_f
         outer = (1.0 - t) * img1_f + t * img2_f
         composed = inner * disk_alpha + outer * (1.0 - disk_alpha)
         composed = np.clip(composed, 0.0, 255.0).astype(np.uint8)
