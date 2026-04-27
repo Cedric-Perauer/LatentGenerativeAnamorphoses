@@ -26,7 +26,7 @@ pip install torch transformers accelerate
 
 ## Requirements
 
-We tested SD3.5 on an RTX 4090. The Flux scripts are less well tested than the SD3.5 version. `flux1_dev.py` requires about **37GB of VRAM** and `flux2_dev.py` requires about **68GB of VRAM** (all at 1024x1024 resolution). We tested the Flux scripts on an RTX Pro 6000 GPU.
+We tested SD3.5 on an RTX 4090.
 
 ## Usage
 
@@ -48,6 +48,8 @@ python sd3.5.py \
 
 <details>
   <summary><strong>Optional Flux1.dev and Flux2.dev inference (not working as well) </strong></summary>
+
+ The Flux scripts are less well tested than the SD3.5 version. `flux1_dev.py` requires about **37GB of VRAM** and `flux2_dev.py` requires about **68GB of VRAM** (all at 1024x1024 resolution). We tested the Flux scripts on an RTX Pro 6000 GPU.
 
 > **Note on Flux 1/2 support**  
 > In our experience, FLUX.1/2-dev currently perform worse than SD3.5 for these anamorphoses because:  
