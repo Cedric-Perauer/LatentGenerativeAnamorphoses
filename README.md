@@ -8,8 +8,15 @@ This project generates **anamorphic images** — single images that reveal diffe
 
 
 | Jigsaw Puzzle : View 1 (Cat) | Jigsaw Puzzle : View 2 (Puppy) |
-|:---:|:---:|
-| <img src="diffusers/outputs/puppy_cat_pop_art/generated_image1.png" width="512"/> | <img src="diffusers/outputs/puppy_cat_pop_art/generated_image2.png" width="512"/> |
+
+
+
+
+
+https://github.com/user-attachments/assets/90a14ecd-d513-442f-ac73-f717710f0673
+
+
+
 
 
 ## Installation
