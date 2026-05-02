@@ -54,6 +54,7 @@ from .lod_new import (
     view,
     view_simple,
     view_lod,
+    soften_inverse_conic,
     inverse_view,
     create_identity_warp,
     create_vertical_flip_warp,
@@ -844,11 +845,22 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             lp2 = LaplacianPyramid(img2, leveln)
             blended_lp = blend_pyramids_masked(lp1, lp2, mask, alpha=alpha)
             gp = Laplacian2Gaussian(blended_lp)
-            return gp[0]
+            blended = gp[0]
+            # Hard composite with the full-res binary mask so the
+            # cone silhouette has a strict boundary (no canoe content
+            # bleeding past the disk through the coarse-level mask blur).
+            hard_mask = (mask > 0.5).to(blended.dtype)
+            if hard_mask.dim() == 4 and hard_mask.shape[1] != blended.shape[1]:
+                hard_mask = hard_mask.expand(-1, blended.shape[1], -1, -1)
+            return hard_mask * blended + (1.0 - hard_mask) * img1
 
         # If only a mask (no pyramids), fall back to full-res masked blend.
         if mask is not None:
-            return masked_blend(img1, img2, mask, alpha=alpha)
+            blended = masked_blend(img1, img2, mask, alpha=alpha)
+            hard_mask = (mask > 0.5).to(blended.dtype)
+            if hard_mask.dim() == 4 and hard_mask.shape[1] != blended.shape[1]:
+                hard_mask = hard_mask.expand(-1, blended.shape[1], -1, -1)
+            return hard_mask * blended + (1.0 - hard_mask) * img1
 
         if use_pyramids:
             lp1 = LaplacianPyramid(img1, leveln)
@@ -1455,7 +1467,12 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
                 latents2 = (latents2 / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
             image = self.vae.decode(latents, return_dict=False)[0]
+            # Apply the conic soften post-processing ONLY for this final
+            # inverse-flip — during the denoising loop it would re-run
+            # scipy gaussian filters every timestep and stall progress.
+            self._apply_conic_soften = True
             image2 = self.inverse_flip_tensor(image,mode=transform_type) #use inverse to get correct rotated view
+            self._apply_conic_soften = False
             image = self.image_processor.postprocess(image, output_type=output_type)
             image2 = self.image_processor.postprocess(image2, output_type=output_type)
             
@@ -1566,6 +1583,15 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             warped = view_lod(image, warp, leveln=5, padding_mode='border')
         else:
             warped = view_simple(image, warp)
+
+        # Conic inverse: only apply soften_inverse_conic at the final image2
+        # step (set self._apply_conic_soften = True before the final
+        # inverse_flip_tensor call). Skipping it during the denoising loop
+        # avoids the expensive scipy gaussian filters that would otherwise
+        # run on every latent channel at every timestep and stall progress.
+        if (transform_type == "conic" and inverse and mask is not None
+                and getattr(self, "_apply_conic_soften", False)):
+            warped = soften_inverse_conic(warped, mask)
 
         # Store mask as instance attribute for use in blending
         self._current_warp_mask = mask

@@ -540,42 +540,42 @@ def create_conic_mirror_warp(
 
     if not inverse:
         # Forward: dest = canvas (canonical), source = rect mirror (rectified).
-        # Self-occluded cone parts (back of cone hidden from oblique eye)
-        # leave holes inside the disk silhouette. Fill them by nearest-
-        # neighbor extrapolation from the ray-traced region so the warp
-        # covers the whole disk smoothly — the paper does the same in its
-        # mirror-view UV figure.
-        u_filled = u_fwd.clone()
-        v_filled = v_fwd.clone()
-        has = valid_fwd.clone()
-        for _ in range(80):
-            if has.all():
+        # Holes inside the disk silhouette (where the ray-trace hit the back
+        # of the cone or the reflection escaped the rect) are filled with a
+        # multi-scale Gaussian "push-pull" fill — strictly better than the
+        # axis-aligned roll/box-blur fill, which produced visible diagonal
+        # streaks because values only propagated row/column-wise.
+        u_np = u_fwd.cpu().numpy().astype(np.float32)
+        v_np = v_fwd.cpu().numpy().astype(np.float32)
+        w_np = valid_fwd.cpu().numpy().astype(np.float32)
+        for sigma in [2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]:
+            if w_np.min() > 0.999:
                 break
-            for axis in (0, 1):
-                for direction in (1, -1):
-                    u_roll = torch.roll(u_filled, direction, axis)
-                    v_roll = torch.roll(v_filled, direction, axis)
-                    h_roll = torch.roll(has, direction, axis)
-                    fill = (~has) & h_roll
-                    u_filled = torch.where(fill, u_roll, u_filled)
-                    v_filled = torch.where(fill, v_roll, v_filled)
-                    has = has | fill
+            wu = scipy.ndimage.gaussian_filter(u_np * w_np, sigma=sigma)
+            wv = scipy.ndimage.gaussian_filter(v_np * w_np, sigma=sigma)
+            ww = scipy.ndimage.gaussian_filter(w_np,        sigma=sigma)
+            new_data = (w_np < 0.5) & (ww > 1e-4)
+            u_np = np.where(new_data, wu / (ww + 1e-8), u_np)
+            v_np = np.where(new_data, wv / (ww + 1e-8), v_np)
+            w_np = np.where(new_data, np.ones_like(w_np), w_np)
+        u_filled = torch.from_numpy(u_np)
+        v_filled = torch.from_numpy(v_np)
+        has = torch.from_numpy(w_np > 0.5)
 
         u_id = x / (width - 1)
         v_id = y / (height - 1)
         # Use ray-traced UV everywhere inside the disk silhouette (filled),
         # identity outside.
-        inside_disk = r_pix <= (r_max * r_out_ratio + feather)
+        inside_disk = r_pix <= (r_max * r_out_ratio)
         warp_u = torch.where(inside_disk & has, u_filled, u_id)
         warp_v = torch.where(inside_disk & has, v_filled, v_id)
         warp_u = torch.clamp(warp_u, 0.0, 1.0)
         warp_v = torch.clamp(warp_v, 0.0, 1.0)
 
-        # Soft disk mask: full inside, soft feather at the silhouette edge.
-        outer_falloff = torch.clamp(
-            (r_max * r_out_ratio + feather - r_pix) / (2.0 * feather), 0.0, 1.0
-        )
-        mask = outer_falloff.unsqueeze(0).unsqueeze(0)
+        # Strict binary disk mask — no feather. The lwp() path hard-composites
+        # with this mask so the cone silhouette has a sharp boundary in the
+        # final blend (no canoe content bleeding past the disk into pred1).
+        mask = inside_disk.float().unsqueeze(0).unsqueeze(0)
     else:
         # Inverse: dest = rect mirror, source = canvas (canonical).
         # Build the inverse by scattering the forward UVs.
@@ -597,21 +597,46 @@ def create_conic_mirror_warp(
         u_inv = torch.where(has_data, u_inv / count.clamp(min=1.0), torch.zeros_like(u_inv))
         v_inv = torch.where(has_data, v_inv / count.clamp(min=1.0), torch.zeros_like(v_inv))
 
-        # Fill holes by nearest-neighbor imputation along each row/col.
-        # (Simple forward/backward fill on flat indices.)
-        for axis in (0, 1):
-            for direction in (1, -1):
-                u_roll = torch.roll(u_inv, shifts=direction, dims=axis)
-                v_roll = torch.roll(v_inv, shifts=direction, dims=axis)
-                h_roll = torch.roll(has_data, shifts=direction, dims=axis)
-                fill_mask = (~has_data) & h_roll
-                u_inv = torch.where(fill_mask, u_roll, u_inv)
-                v_inv = torch.where(fill_mask, v_roll, v_inv)
-                has_data = has_data | fill_mask
+        # The mask encodes three regions in one float channel so callers
+        # can recover them without re-running the scatter:
+        #   1.0  → natively valid (real scatter contributions)
+        #   0.5  → apex hole — filled by interpolation, blur recommended
+        #   0.0  → outside the disk silhouette (strict black)
+        # ``mask > 0.5`` (used by the pipeline's lwp) recovers the full
+        # active region; the test script reads the float values to detect
+        # the apex hole and apply targeted blur there.
+        has_data_np = has_data.cpu().numpy()
+        filled_np = scipy.ndimage.binary_fill_holes(has_data_np)
+        apex_hole_np = filled_np & (~has_data_np)
+        encoded_np = (has_data_np.astype(np.float32) * 1.0
+                      + apex_hole_np.astype(np.float32) * 0.5)
+        inverse_mask_2d = torch.from_numpy(encoded_np)
 
-        warp_u = torch.clamp(u_inv, 0.0, 1.0)
-        warp_v = torch.clamp(v_inv, 0.0, 1.0)
-        mask = torch.ones(1, 1, height, width, dtype=warp_u.dtype)
+        # Multi-scale Gaussian push-pull fill (pyramid-style). Eliminates
+        # axis-aligned streaks that a box-blur or roll-based fill produces:
+        # at each scale we form a Gaussian-weighted average sum(u·w)/sum(w)
+        # and use it to fill cells whose hole is wider than the current
+        # scale. Successively coarser scales pull values across the apex
+        # hole (the rect-mirror centre) without any directional bias.
+        u_np = u_inv.cpu().numpy().astype(np.float32)
+        v_np = v_inv.cpu().numpy().astype(np.float32)
+        w_np = has_data.cpu().numpy().astype(np.float32)
+        for sigma in [2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]:
+            if w_np.min() > 0.999:
+                break
+            wu = scipy.ndimage.gaussian_filter(u_np * w_np, sigma=sigma)
+            wv = scipy.ndimage.gaussian_filter(v_np * w_np, sigma=sigma)
+            ww = scipy.ndimage.gaussian_filter(w_np,        sigma=sigma)
+            new_known = (w_np < 0.5) & (ww > 1e-4)
+            u_np = np.where(new_known, wu / (ww + 1e-8), u_np)
+            v_np = np.where(new_known, wv / (ww + 1e-8), v_np)
+            w_np = np.where(new_known, np.ones_like(w_np), w_np)
+        u_filled = torch.from_numpy(u_np)
+        v_filled = torch.from_numpy(v_np)
+
+        warp_u = torch.clamp(u_filled, 0.0, 1.0)
+        warp_v = torch.clamp(v_filled, 0.0, 1.0)
+        mask = inverse_mask_2d.float().unsqueeze(0).unsqueeze(0)
 
     warp = torch.stack([warp_u, warp_v], dim=0).unsqueeze(0)  # (1, 2, H, W)
     third_channel = torch.zeros(1, 1, height, width)
@@ -822,29 +847,32 @@ def _get_grid(warp, maxLOD):
         maxLOD: Maximum LOD level
     
     Returns:
-        grid: (1, 1, H, W, 3) tensor with (lod, u, v) coordinates in [-1, 1]
+        grid: (1, 1, H, W, 3) tensor with (u, v, lod) coordinates in [-1, 1].
+        Order matches F.grid_sample's 5D convention (x→W, y→H, z→D), where
+        the layers tensor is stacked along D = pyramid level.
     """
     h, w = warp.shape[-2:]
-    
+
     # Compute LOD level and normalize to (-1, 1)
-    mapping = h * warp[:, :2]  # Scale UV to pixel coordinates
-    lod = _compute_lod_level(mapping, maxLOD=maxLOD)
-    lod = 2 * lod / maxLOD - 1.0  # Normalize to (-1, 1)
+    mapping = max(h, w) * warp[:, :2]
+    lod = _compute_lod_max_col(mapping, maxLOD=maxLOD)
+    lod = 2 * lod / max(maxLOD, 1) - 1.0
     lod = lod.unsqueeze(0).unsqueeze(-1)  # (1, H, W, 1)
-    
+
     # Normalize UV to (-1, 1)
-    grid = warp[:, :2].permute(0, 2, 3, 1)  # (1, H, W, 2)
-    
-    # Mark undefined regions (where UV is exactly 0) with NaN
-    mask = torch.all(grid == 0.0, dim=-1, keepdim=True)
-    mask = mask.expand(-1, -1, -1, 2)
+    grid = warp[:, :2].permute(0, 2, 3, 1)  # (1, H, W, 2) order (u, v)
+
+    # Mark undefined regions (UV exactly 0) with NaN.
+    nan_mask = torch.all(grid == 0.0, dim=-1, keepdim=True).expand(-1, -1, -1, 2)
     grid = grid.clone()
-    grid[mask] = float('nan')
-    grid = 2 * grid - 1  # Convert from [0,1] to [-1,1]
-    
-    # Combine into 3D coordinate grid (lod, u, v)
-    grid = torch.cat([lod, grid], dim=-1).unsqueeze(1)  # (1, 1, H, W, 3)
-    
+    grid[nan_mask] = float('nan')
+    grid = 2 * grid - 1
+
+    # 5D grid_sample expects last-dim order (x, y, z) with x→W, y→H, z→D.
+    # Our layers volume is stacked along D = pyramid level, H = height,
+    # W = width, so we want (u, v, lod) here.
+    grid = torch.cat([grid, lod], dim=-1).unsqueeze(1)  # (1, 1, H, W, 3)
+
     return grid
 
 
@@ -972,6 +1000,73 @@ def _compute_lod_max_col(uv_map, maxLOD):
     scale = torch.clamp(torch.maximum(col_x, col_y), min=1.0)
     lod = torch.log2(scale)
     return torch.clamp(lod, min=0.0, max=float(maxLOD))
+
+
+def soften_inverse_conic(recovered, mask, apex_sigma=60.0,
+                         outside_blur_sigma=20.0, outside_fade_dist=40.0,
+                         edge_blend_sigma=6.0):
+    """Post-process the conic-mirror inverse-warp result so it matches the
+    benchmark inverse_correct.png style:
+
+    - Inside the disk silhouette, the **apex-hole region** (where the
+      forward warp had no scatter contributions and the inverse warp
+      filled by interpolation) is replaced with a heavy Gaussian blur,
+      blended in via a soft weight derived from the apex-hole indicator.
+      The mask returned by ``create_conic_mirror_warp(inverse=True)``
+      encodes this region as values around 0.5; values around 1.0 are
+      native scatter (kept sharp); 0.0 is outside the disk.
+    - Outside the disk silhouette, a heavily-blurred copy of the
+      recovered content is alpha-faded to black over a short distance,
+      so the boundary has a soft halo rather than a hard cutoff.
+
+    Args:
+        recovered: (B, C, H, W) torch tensor — output of view_*.
+        mask:      (1, 1, H, W) torch tensor — encoded inverse mask from
+                   ``create_conic_mirror_warp(inverse=True)``.
+
+    Returns:
+        (B, C, H, W) tensor with the same dtype as ``recovered``.
+    """
+    out_dtype = recovered.dtype
+    img_b = recovered.float()
+    if img_b.ndim == 3:
+        img_b = img_b.unsqueeze(0)
+    B, C, H, W = img_b.shape
+
+    img_np_b = img_b.clamp(0, 1).float().cpu().numpy()  # (B, C, H, W)
+    m = mask[0, 0].clamp(0, 1).float().cpu().numpy().astype(np.float32)
+
+    # Heavy-blur passes for the apex blur and the outside fade. We blur
+    # each batch/channel separately along H, W only.
+    img_apex = np.empty_like(img_np_b)
+    img_out  = np.empty_like(img_np_b)
+    for b in range(B):
+        for c in range(C):
+            img_apex[b, c] = scipy.ndimage.gaussian_filter(img_np_b[b, c], sigma=apex_sigma)
+            img_out[b,  c] = scipy.ndimage.gaussian_filter(img_np_b[b, c], sigma=outside_blur_sigma)
+
+    # Apex weight: take the apex-hole region directly from the encoded mask.
+    apex_hole = ((m > 0.3) & (m < 0.7)).astype(np.float32)
+    apex_w = scipy.ndimage.gaussian_filter(apex_hole, sigma=20.0)
+    apex_w = np.clip(apex_w, 0.0, 1.0)
+    inside_content = img_np_b * (1.0 - apex_w[None, None]) + img_apex * apex_w[None, None]
+
+    # Outside fade: distance from the binary disk silhouette, fading to black.
+    binary_mask = (m > 0.3)
+    dist_outside = scipy.ndimage.distance_transform_edt(~binary_mask)
+    outside_alpha = np.clip(1.0 - dist_outside / outside_fade_dist, 0.0, 1.0)
+    outside_alpha = scipy.ndimage.gaussian_filter(outside_alpha, sigma=8.0)
+    outside_alpha = np.clip(outside_alpha, 0.0, 1.0)
+    outside_content = img_out * outside_alpha[None, None]
+
+    # Soft blend between inside and outside content along the silhouette.
+    soft_m = scipy.ndimage.gaussian_filter(binary_mask.astype(np.float32),
+                                           sigma=edge_blend_sigma)
+    soft_m = np.clip(soft_m, 0.0, 1.0)
+
+    out = soft_m[None, None] * inside_content + (1.0 - soft_m[None, None]) * outside_content
+    out = np.clip(out, 0, 1).astype(np.float32)
+    return torch.from_numpy(out).to(recovered.device, dtype=out_dtype)
 
 
 def view_lod(image, warp, leveln=5, padding_mode='border'):
@@ -1141,25 +1236,45 @@ def inverse_view(im, warp, leveln):
         # Extract gradients
         result = [-lvl.grad.detach() for lvl in opt_var]
         
-        # Normalize by the count channel
+        # Normalize by the count channel. Per the paper's pseudocode
+        # (resources/suppl_images-pseudocode.py): r[:, :c] / r[:, -1:].
+        # Don't clamp the denominator — empty regions (no scatter
+        # contributions) must produce NaN/Inf, which marks them for
+        # nearest-value imputation in the per-level loop below. Without
+        # this, "no data" pixels stay at 0 and Laplacian2Gaussian
+        # propagates them as black through the reconstruction.
         processed = []
         for r in result:
             num = r[:, :c]
-            den = r[:, c:]
-            den = torch.clamp(torch.abs(den), min=1e-8)
-            res = num / den
-            res = res.squeeze(0)  # Remove batch dim
+            den = r[:, -1:]
+            with torch.no_grad():
+                res = num / den
+                # Convert ±Inf (from 0/0 with sign) to NaN so impute fires.
+                res = torch.where(torch.isfinite(res), res, torch.full_like(res, float('nan')))
+                res = res.squeeze(0)
             processed.append(res)
         result = processed
-    
-    # Extract Laplacian pyramid with imputation
+
+    # Per-level nearest-value imputation, then convert each level to its
+    # Laplacian (subtract pyrUp(pyrDown(.))) — matches paper figure
+    # (b)–(g) in resources/suppl_images-lpw_interm_steps.pdf.
     for k in range(leveln - 1):
-        mask = ~torch.isnan(result[k])  # True where valid
-        imputed = impute_with_nearest(result[k], mask)
-        result[k] = imputed - pyrUp(pyrDown(imputed))
-        # Restore NaN where originally missing
-        result[k][~mask] = float('nan')
-    
+        mask = ~torch.isnan(result[k])
+        if mask.any():
+            imputed = impute_with_nearest(result[k], mask)
+            result[k] = imputed - pyrUp(pyrDown(imputed))
+        else:
+            result[k] = torch.zeros_like(result[k])
+
+    # Coarsest Gaussian level also needs imputation so the reconstructed
+    # base doesn't carry NaN through Laplacian2Gaussian.
+    last = result[leveln - 1]
+    mask_last = ~torch.isnan(last)
+    if mask_last.any():
+        result[leveln - 1] = impute_with_nearest(last, mask_last)
+    else:
+        result[leveln - 1] = torch.zeros_like(last)
+
     return result
 
 

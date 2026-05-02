@@ -53,6 +53,7 @@ from .lod_new import (
     create_jigsaw_warp,
     view_simple,
     view_lod,
+    soften_inverse_conic,
     LaplacianPyramid,
     Laplacian2Gaussian,
     blend_pyramids,
@@ -573,6 +574,13 @@ class FluxPipeline(
             warped = view_lod(image, warp, leveln=5, padding_mode='border')
         else:
             warped = view_simple(image, warp)
+
+        # Conic inverse: only soften at the final image2 step
+        # (self._apply_conic_soften = True). Skipping during the denoising
+        # loop avoids running expensive scipy gaussian filters every step.
+        if (transform_type == "conic" and inverse and mask is not None
+                and getattr(self, "_apply_conic_soften", False)):
+            warped = soften_inverse_conic(warped, mask)
         self._current_warp_mask = mask
 
         return warped.to(image.dtype)
@@ -591,16 +599,26 @@ class FluxPipeline(
         while img2.ndim > 4:
             img2 = img2.squeeze(0)
 
-        # Per-level mask-weighted Laplacian blending for partial-view warps.
+        # Per-level mask-weighted Laplacian blending for partial-view warps,
+        # then hard-composite with a binary mask so the silhouette boundary
+        # stays strict (no coarse-level mask blur leaking img2 across).
         if mask is not None and use_pyramids:
             lp1 = LaplacianPyramid(img1, leveln)
             lp2 = LaplacianPyramid(img2, leveln)
             blended_lp = blend_pyramids_masked(lp1, lp2, mask, alpha=alpha)
             gp = Laplacian2Gaussian(blended_lp)
-            return gp[0]
+            blended = gp[0]
+            hard_mask = (mask > 0.5).to(blended.dtype)
+            if hard_mask.dim() == 4 and hard_mask.shape[1] != blended.shape[1]:
+                hard_mask = hard_mask.expand(-1, blended.shape[1], -1, -1)
+            return hard_mask * blended + (1.0 - hard_mask) * img1
 
         if mask is not None:
-            return masked_blend(img1, img2, mask, alpha=alpha)
+            blended = masked_blend(img1, img2, mask, alpha=alpha)
+            hard_mask = (mask > 0.5).to(blended.dtype)
+            if hard_mask.dim() == 4 and hard_mask.shape[1] != blended.shape[1]:
+                hard_mask = hard_mask.expand(-1, blended.shape[1], -1, -1)
+            return hard_mask * blended + (1.0 - hard_mask) * img1
 
         if use_pyramids:
             lp1 = LaplacianPyramid(img1, leveln)
@@ -1081,7 +1099,9 @@ class FluxPipeline(
             latents_spatial = (latents_spatial / self.vae.config.scaling_factor) + self.vae.config.shift_factor
 
             image = self.vae.decode(latents_spatial, return_dict=False)[0]
+            self._apply_conic_soften = True
             image2 = self.inverse_flip_tensor(image, mode=transform_type)
+            self._apply_conic_soften = False
             image = self.image_processor.postprocess(image, output_type=output_type)
             image2 = self.image_processor.postprocess(image2, output_type=output_type)
 
