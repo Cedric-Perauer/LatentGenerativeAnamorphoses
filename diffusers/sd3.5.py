@@ -8,7 +8,7 @@ pipe = StableDiffusion3Pipeline.from_pretrained(
 ).to("cuda")
 
 #transform_type = "vertical"
-possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw"]
+possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw", "conic"]
 
 parser = argparse.ArgumentParser(description="Generate SD3.5 dual prompts with a shared style.")
 parser.add_argument("--style-prompt", default="a pop art of ", help="Style prefix applied to both prompts.")
@@ -49,4 +49,96 @@ image1, image2 = pipe(
 os.makedirs(args.output_dir, exist_ok=True)
 image1.save(os.path.join(args.output_dir, "generated_image1.png"))
 image2.save(os.path.join(args.output_dir, "generated_image2.png"))
+
+
+def _save_warp_diagnostics(out_dir, transform, h=1024, w=1024):
+    """Render and save the UV warp map, the blend mask, and the LOD map
+    used by the Laplacian-pyramid warping path. Layout/coloring matches
+    the LookingGlass paper figure: outside the active mask the UV map is
+    rendered as black; the LOD map is shown with a viridis colormap."""
+    from PIL import Image as _PILImage
+    import numpy as _np
+    import torch as _torch
+
+    try:
+        from diffusers.pipelines.stable_diffusion_3.lod_new import (
+            create_identity_warp,
+            create_vertical_flip_warp,
+            create_circular_rotation_warp,
+            create_conic_mirror_warp,
+            create_jigsaw_warp,
+            _compute_lod_max_col,
+        )
+    except Exception as e:
+        print(f"[warp viz] skipped: {e}")
+        return
+
+    def _uv_to_rgb(warp_t, mask_t):
+        # Paper's literal encoding (matches resources/suppl_images-cone_view
+        # panel b "identity UV" and panel c "mirror view UV"): R = u_src,
+        # G = v_src, B = 0 — i.e. just plot the (u, v) source coordinates
+        # directly. Black outside the active mask.
+        uv = warp_t[0, :2].clamp(0, 1).cpu().numpy()
+        rgb = _np.stack([uv[0], uv[1], _np.zeros_like(uv[0])], axis=-1)
+        if mask_t is not None:
+            m = mask_t[0, 0].clamp(0, 1).cpu().numpy()[..., None]
+            rgb = rgb * m
+        return (rgb * 255).clip(0, 255).astype(_np.uint8)
+
+    def _mask_to_rgb(mask_t):
+        if mask_t is None:
+            return _np.full((h, w, 3), 200, dtype=_np.uint8)
+        m = mask_t[0, 0].clamp(0, 1).cpu().numpy()
+        return (_np.stack([m, m, m], axis=-1) * 255).astype(_np.uint8)
+
+    def _lod_to_rgb(warp_t, mask_t, max_lod=4):
+        # viridis-style colormap (5-stop linear interp) of the per-pixel LOD.
+        mapping = float(max(h, w)) * warp_t[:, :2]
+        lod = _compute_lod_max_col(mapping, maxLOD=max_lod).cpu().numpy()
+        lod_n = (lod / max_lod).clip(0, 1)
+        stops = _np.array([
+            [0.267, 0.005, 0.329],   # 0 viridis dark purple
+            [0.282, 0.140, 0.457],   # 0.25
+            [0.190, 0.408, 0.556],   # 0.5
+            [0.208, 0.718, 0.473],   # 0.75
+            [0.993, 0.906, 0.143],   # 1.0 yellow
+        ])
+        # Linear interp between stops
+        scaled = lod_n * 4.0
+        i = _np.floor(scaled).clip(0, 3).astype(_np.int32)
+        f = (scaled - i)[..., None]
+        rgb = stops[i] * (1 - f) + stops[i + 1] * f
+        if mask_t is not None:
+            m = mask_t[0, 0].clamp(0, 1).cpu().numpy()[..., None]
+            rgb = rgb * m + (1 - m) * stops[0]
+        return (rgb * 255).clip(0, 255).astype(_np.uint8)
+
+    if transform == "conic":
+        warp_f, mask_f = create_conic_mirror_warp(h, w, inverse=False)
+        warp_i, mask_i = create_conic_mirror_warp(h, w, inverse=True)
+    elif transform in ("90rot", "135rot", "180rot"):
+        angle = float(transform.replace("rot", ""))
+        warp_f, mask_f = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
+        warp_i, mask_i = create_circular_rotation_warp(h, w, -angle, radius_ratio=0.45)
+    elif transform == "jigsaw":
+        warp_f = create_jigsaw_warp(h, w, seed=42, inverse=False)
+        warp_i = create_jigsaw_warp(h, w, seed=42, inverse=True)
+        mask_f = mask_i = None
+    elif transform == "vertical":
+        warp_f = warp_i = create_vertical_flip_warp(h, w)
+        mask_f = mask_i = None
+    else:
+        warp_f = warp_i = create_identity_warp(h, w)
+        mask_f = mask_i = None
+
+    _PILImage.fromarray(_uv_to_rgb(warp_f, mask_f)).save(os.path.join(out_dir, "warp_uv_forward.png"))
+    _PILImage.fromarray(_uv_to_rgb(warp_i, mask_i)).save(os.path.join(out_dir, "warp_uv_inverse.png"))
+    _PILImage.fromarray(_mask_to_rgb(mask_f)).save(os.path.join(out_dir, "warp_mask_forward.png"))
+    _PILImage.fromarray(_mask_to_rgb(mask_i)).save(os.path.join(out_dir, "warp_mask_inverse.png"))
+    _PILImage.fromarray(_lod_to_rgb(warp_f, mask_f)).save(os.path.join(out_dir, "warp_lod_forward.png"))
+    _PILImage.fromarray(_lod_to_rgb(warp_i, mask_i)).save(os.path.join(out_dir, "warp_lod_inverse.png"))
+    print(f"[warp viz] wrote UV + mask + LOD to {out_dir}")
+
+
+_save_warp_diagnostics(args.output_dir, transform_type)
 

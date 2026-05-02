@@ -35,11 +35,14 @@ from .lod_new import (
     create_vertical_flip_warp,
     create_identity_warp,
     create_circular_rotation_warp,
+    create_conic_mirror_warp,
     create_jigsaw_warp,
     view_simple,
+    view_lod,
     LaplacianPyramid,
     Laplacian2Gaussian,
     blend_pyramids,
+    blend_pyramids_masked,
     masked_blend,
 )
 
@@ -707,7 +710,7 @@ class Flux2Pipeline(DiffusionPipeline):
             return torch.flip(noise_sample, [2])
         elif mode == '90flip':
             return torch.rot90(noise_sample, 1, [2, 3])
-        elif mode in ('90rot', '135rot', '180rot'):
+        elif mode in ('90rot', '135rot', '180rot', 'conic'):
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=False)
         elif mode == 'jigsaw':
             return self.apply_laplacian_warp(noise_sample, transform_type='jigsaw', inverse=False)
@@ -721,7 +724,7 @@ class Flux2Pipeline(DiffusionPipeline):
             return torch.flip(noise_sample, [2])
         elif mode == '90flip':
             return torch.rot90(noise_sample, -1, [2, 3])
-        elif mode in ('90rot', '135rot', '180rot'):
+        elif mode in ('90rot', '135rot', '180rot', 'conic'):
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=True)
         elif mode == 'jigsaw':
             return self.apply_laplacian_warp(noise_sample, transform_type='jigsaw', inverse=True)
@@ -759,6 +762,15 @@ class Flux2Pipeline(DiffusionPipeline):
         elif transform_type == "180rot":
             angle = -180.0 if inverse else 180.0
             warp, mask = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
+        elif transform_type == "conic":
+            r_in_ratio = getattr(self, '_conic_r_in_ratio', 0.15)
+            r_out_ratio = getattr(self, '_conic_r_out_ratio', 0.95)
+            warp, mask = create_conic_mirror_warp(
+                h, w,
+                r_in_ratio=r_in_ratio,
+                r_out_ratio=r_out_ratio,
+                inverse=inverse,
+            )
         elif transform_type == "jigsaw":
             jigsaw_seed = getattr(self, '_jigsaw_seed', 42)
             cache = getattr(self, "_jigsaw_warp_cache", {})
@@ -776,7 +788,10 @@ class Flux2Pipeline(DiffusionPipeline):
         if mask is not None:
             mask = mask.to(image.device, dtype=image.dtype)
 
-        warped = view_simple(image, warp)
+        if transform_type == "conic" and not inverse:
+            warped = view_lod(image, warp, leveln=5, padding_mode='border')
+        else:
+            warped = view_simple(image, warp)
         self._current_warp_mask = mask
 
         return warped.to(image.dtype)
@@ -786,6 +801,14 @@ class Flux2Pipeline(DiffusionPipeline):
             img1 = img1.squeeze(0)
         while img2.ndim > 4:
             img2 = img2.squeeze(0)
+
+        # Per-level mask-weighted Laplacian blending for partial-view warps.
+        if mask is not None and use_pyramids:
+            lp1 = LaplacianPyramid(img1, leveln)
+            lp2 = LaplacianPyramid(img2, leveln)
+            blended_lp = blend_pyramids_masked(lp1, lp2, mask, alpha=alpha)
+            gp = Laplacian2Gaussian(blended_lp)
+            return gp[0]
 
         if mask is not None:
             return masked_blend(img1, img2, mask, alpha=alpha)

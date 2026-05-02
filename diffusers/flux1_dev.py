@@ -7,7 +7,7 @@ pipe = FluxPipeline.from_pretrained(
     "black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16
 ).to("cuda")
 
-possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw"]
+possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw", "conic"]
 
 parser = argparse.ArgumentParser(description="Generate Flux2 Dev dual-prompt anamorphic images.")
 parser.add_argument("--style-prompt", default="a pop art of ", help="Style prefix applied to both prompts.")

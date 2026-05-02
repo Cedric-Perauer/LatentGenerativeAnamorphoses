@@ -3,7 +3,7 @@ import os
 import torch
 from diffusers import Flux2Pipeline
 
-possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw"]
+possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw", "conic"]
 
 parser = argparse.ArgumentParser(description="Generate Flux2 Dev dual-prompt anamorphic images.")
 parser.add_argument("--style-prompt", default="a pop art of ", help="Style prefix applied to both prompts.")

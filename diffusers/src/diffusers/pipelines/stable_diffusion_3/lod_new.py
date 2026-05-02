@@ -388,7 +388,235 @@ def create_circular_rotation_warp(height, width, angle_degrees, radius_ratio=0.4
     outer_radius = radius + feather_width
     mask = torch.clamp((outer_radius - dist) / (2 * feather_width + 1e-6), 0.0, 1.0)
     mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, H, W)
-    
+
+    return warp, mask
+
+
+def _raytrace_conic_mirror(
+    height, width,
+    cone_height=1.0,
+    cone_radius=1.0,
+    cone_half_angle_deg=35.0,
+    eye_dir=(0.0, 0.0, -1.0),
+    table_extent=3.0,
+):
+    """Compute the conic-mirror UV map by direct ray reflection on the cone.
+
+    Setup (matches LookingGlass paper supplementary panel (c)):
+      - Apex-up cone at the canvas center. Cone half-angle defaults to 22°
+        (slightly steeper than 45°) so that *every* reflected ray has a
+        downward component and lands on the ground — i.e. the warp is
+        well-defined over the whole disk, not just one half. (A 45° cone
+        with oblique illumination has half its surface reflecting upward
+        and never hitting the ground; smaller angles avoid that.)
+      - Painting (rect mirror) on z = 0, occupying [-table_extent, table_extent]².
+      - Each canvas pixel (px, py) in the disk maps directly to the cone
+        surface point at (px, py, Hc − r/tan α). No perspective camera —
+        we trace illumination from a parallel direction ``eye_dir`` so
+        every cone surface point is mapped (no self-occlusion holes).
+
+    Returns
+    -------
+    u_src, v_src : (H, W) float32 — source UVs in [0, 1].
+    valid        : (H, W) bool   — True inside the disk and where the
+                                   reflection lands on the rect.
+    """
+    Hc = float(cone_height)
+    alpha = np.deg2rad(cone_half_angle_deg)
+    tan_a = np.tan(alpha)
+    cos_a = np.cos(alpha)
+    sin_a = np.sin(alpha)
+    # Cone radius at the base (z = 0) given height Hc and half-angle.
+    base_radius = Hc * tan_a
+    # Canvas radius in scene units = base_radius (the disk silhouette).
+    canvas_radius_scene = base_radius
+
+    cy, cx = (height - 1) / 2.0, (width - 1) / 2.0
+    ys_grid, xs_grid = np.indices((height, width)).astype(np.float64)
+    px = (xs_grid - cx) / (min(height, width) / 2.0) * canvas_radius_scene
+    py = (ys_grid - cy) / (min(height, width) / 2.0) * canvas_radius_scene
+    r_xy = np.sqrt(px ** 2 + py ** 2)
+    inside_disk = r_xy <= canvas_radius_scene
+
+    # Cone surface: r = tan α (H − z) → z(r) = H − r / tan α.
+    surf_z = Hc - r_xy / max(tan_a, 1e-12)
+    # Outward normal at half-angle α: n = (cos α cos θ, cos α sin θ, sin α).
+    safe_r = np.where(r_xy > 1e-9, r_xy, 1e-9)
+    cos_th = px / safe_r
+    sin_th = py / safe_r
+    nx = cos_a * cos_th
+    ny = cos_a * sin_th
+    nz = np.full_like(px, sin_a)
+
+    dx0, dy0, dz0 = (np.array(eye_dir, dtype=np.float64)
+                     / (np.linalg.norm(eye_dir) + 1e-12))
+    d_dot_n = dx0 * nx + dy0 * ny + dz0 * nz
+    rx = dx0 - 2.0 * d_dot_n * nx
+    ry = dy0 - 2.0 * d_dot_n * ny
+    rz = dz0 - 2.0 * d_dot_n * nz
+
+    t_g = -surf_z / (rz - 1e-12)
+    gx = px + t_g * rx
+    gy = py + t_g * ry
+    hits_ground = (rz < 0) & (t_g > 0)
+
+    u_src = (gx + table_extent) / (2.0 * table_extent)
+    v_src = (gy + table_extent) / (2.0 * table_extent)
+    in_rect = (u_src >= 0) & (u_src <= 1) & (v_src >= 0) & (v_src <= 1)
+    valid = inside_disk & hits_ground & in_rect
+
+    return u_src.astype(np.float32), v_src.astype(np.float32), valid
+
+
+def create_conic_mirror_warp(
+    height,
+    width,
+    r_in_ratio=0.0,
+    r_out_ratio=0.95,
+    feather_ratio=0.04,
+    inverse=False,
+    eye_dir=(0.0, 0.0, -1.0),
+    cone_height=1.0,
+    cone_half_angle_deg=35.0,
+    table_extent=3.0,
+):
+    """
+    Conic mirror anamorphosis warp (polar unwrap of an annulus).
+
+    Geometry: an apex-up 45° cone sits at the canvas center. The painted
+    image lives on the table in the annulus r in [r_in, r_out] around the
+    center; the viewer looks straight down. The perceived (rectified) image
+    is the polar unwrap of that annulus, where the horizontal axis encodes
+    angle theta in [-pi, pi) and the vertical axis encodes radius (top of
+    the rectangle = outer edge of the annulus, bottom = inner edge near the
+    cone apex). This matches the standard cv2.warpPolar(WARP_POLAR_LINEAR)
+    and the Looking Glass paper convention.
+
+    Convention (matches the rotation/jigsaw warps in this module):
+      - inverse=False: destination is the canonical (annular table) view,
+        source is the rectangular mirror view; outside the annulus the
+        warp is identity (so the surrounding canvas passes through).
+      - inverse=True : destination is the rectangular mirror view, source
+        is the canonical annular view.
+
+    Args:
+        height, width: square canvas dims (H == W expected).
+        r_in_ratio:  inner annulus radius as a fraction of min(H, W) / 2.
+        r_out_ratio: outer annulus radius as a fraction of min(H, W) / 2.
+        feather_ratio: width of the soft annulus boundary as a fraction
+            of (r_out - r_in). Used only for the forward (annular) mask.
+        inverse: see above.
+
+    Returns:
+        warp: (1, 3, H, W) UV warp field with values in [0, 1].
+        mask: (1, 1, H, W) blending mask in [0, 1]. Annular for the forward
+            direction, all-ones for the inverse direction.
+    """
+    cy = (height - 1) / 2.0
+    cx = (width - 1) / 2.0
+    r_max = min(height, width) / 2.0
+    feather = max(1.0, feather_ratio * r_max * r_out_ratio)
+    canvas_radius = r_out_ratio  # canvas disk radius in scene units
+
+    y = torch.arange(height).float().view(-1, 1).expand(height, width)
+    x = torch.arange(width).float().view(1, -1).expand(height, width)
+    dx = x - cx
+    dy = y - cy
+    r_pix = torch.sqrt(dx * dx + dy * dy)
+
+    # Ray-trace the conic mirror to produce (u_src, v_src) and a validity
+    # mask for the forward direction (canvas → rect mirror via cone).
+    u_fwd_np, v_fwd_np, valid_fwd_np = _raytrace_conic_mirror(
+        height, width,
+        cone_height=cone_height,
+        cone_radius=cone_height,
+        cone_half_angle_deg=cone_half_angle_deg,
+        eye_dir=eye_dir,
+        table_extent=table_extent,
+    )
+    u_fwd = torch.from_numpy(u_fwd_np)
+    v_fwd = torch.from_numpy(v_fwd_np)
+    valid_fwd = torch.from_numpy(valid_fwd_np)
+
+    if not inverse:
+        # Forward: dest = canvas (canonical), source = rect mirror (rectified).
+        # Self-occluded cone parts (back of cone hidden from oblique eye)
+        # leave holes inside the disk silhouette. Fill them by nearest-
+        # neighbor extrapolation from the ray-traced region so the warp
+        # covers the whole disk smoothly — the paper does the same in its
+        # mirror-view UV figure.
+        u_filled = u_fwd.clone()
+        v_filled = v_fwd.clone()
+        has = valid_fwd.clone()
+        for _ in range(80):
+            if has.all():
+                break
+            for axis in (0, 1):
+                for direction in (1, -1):
+                    u_roll = torch.roll(u_filled, direction, axis)
+                    v_roll = torch.roll(v_filled, direction, axis)
+                    h_roll = torch.roll(has, direction, axis)
+                    fill = (~has) & h_roll
+                    u_filled = torch.where(fill, u_roll, u_filled)
+                    v_filled = torch.where(fill, v_roll, v_filled)
+                    has = has | fill
+
+        u_id = x / (width - 1)
+        v_id = y / (height - 1)
+        # Use ray-traced UV everywhere inside the disk silhouette (filled),
+        # identity outside.
+        inside_disk = r_pix <= (r_max * r_out_ratio + feather)
+        warp_u = torch.where(inside_disk & has, u_filled, u_id)
+        warp_v = torch.where(inside_disk & has, v_filled, v_id)
+        warp_u = torch.clamp(warp_u, 0.0, 1.0)
+        warp_v = torch.clamp(warp_v, 0.0, 1.0)
+
+        # Soft disk mask: full inside, soft feather at the silhouette edge.
+        outer_falloff = torch.clamp(
+            (r_max * r_out_ratio + feather - r_pix) / (2.0 * feather), 0.0, 1.0
+        )
+        mask = outer_falloff.unsqueeze(0).unsqueeze(0)
+    else:
+        # Inverse: dest = rect mirror, source = canvas (canonical).
+        # Build the inverse by scattering the forward UVs.
+        u_inv = torch.zeros(height, width, dtype=torch.float32)
+        v_inv = torch.zeros(height, width, dtype=torch.float32)
+        count = torch.zeros(height, width, dtype=torch.float32)
+
+        x_canon = (x / (width - 1)).flatten()
+        y_canon = (y / (height - 1)).flatten()
+        u_dst = (u_fwd.flatten() * (width - 1)).round().long().clamp(0, width - 1)
+        v_dst = (v_fwd.flatten() * (height - 1)).round().long().clamp(0, height - 1)
+        valid_flat = valid_fwd.flatten()
+        idx = (v_dst * width + u_dst)[valid_flat]
+        u_inv.flatten().scatter_add_(0, idx, x_canon[valid_flat])
+        v_inv.flatten().scatter_add_(0, idx, y_canon[valid_flat])
+        count.flatten().scatter_add_(0, idx, torch.ones_like(x_canon)[valid_flat])
+
+        has_data = count > 0
+        u_inv = torch.where(has_data, u_inv / count.clamp(min=1.0), torch.zeros_like(u_inv))
+        v_inv = torch.where(has_data, v_inv / count.clamp(min=1.0), torch.zeros_like(v_inv))
+
+        # Fill holes by nearest-neighbor imputation along each row/col.
+        # (Simple forward/backward fill on flat indices.)
+        for axis in (0, 1):
+            for direction in (1, -1):
+                u_roll = torch.roll(u_inv, shifts=direction, dims=axis)
+                v_roll = torch.roll(v_inv, shifts=direction, dims=axis)
+                h_roll = torch.roll(has_data, shifts=direction, dims=axis)
+                fill_mask = (~has_data) & h_roll
+                u_inv = torch.where(fill_mask, u_roll, u_inv)
+                v_inv = torch.where(fill_mask, v_roll, v_inv)
+                has_data = has_data | fill_mask
+
+        warp_u = torch.clamp(u_inv, 0.0, 1.0)
+        warp_v = torch.clamp(v_inv, 0.0, 1.0)
+        mask = torch.ones(1, 1, height, width, dtype=warp_u.dtype)
+
+    warp = torch.stack([warp_u, warp_v], dim=0).unsqueeze(0)  # (1, 2, H, W)
+    third_channel = torch.zeros(1, 1, height, width)
+    warp = torch.cat([warp, third_channel], dim=1)            # (1, 3, H, W)
+
     return warp, mask
 
 
@@ -712,6 +940,119 @@ def view_simple(image, warp):
     return warped.to(dtype)
 
 
+def _compute_lod_max_col(uv_map, maxLOD):
+    """
+    LOD per pixel from the Jacobian's max column norm.
+
+    Unlike ``_compute_lod_level`` (which uses Frobenius norm and a 0.85
+    fudge factor and so returns lod ≈ 0.4 for an identity warp), this
+    returns lod = 0 when the warp is locally non-contracting. Specifically,
+    let s be the larger of the column norms of the Jacobian (i.e. the
+    pixel-space scale factor in the dominant direction); then
+    lod = clamp(log2(max(s, 1)), 0, maxLOD). At identity s = 1 → lod = 0;
+    at 2x compression s = 2 → lod = 1; etc.
+    """
+    uv = uv_map[0].permute(1, 2, 0)  # (H, W, 2)
+    u = uv[..., 0]
+    v = uv[..., 1]
+    period = float(uv_map.shape[-1])  # u/v are in pixel units of width
+
+    def _wrap(d):
+        # Shortest signed difference modulo `period`. Wrap BEFORE the /2 so
+        # the conic atan2 seam (raw jump ≈ ±period) collapses to ~0 instead
+        # of producing a spurious max-LOD ridge along the θ = ±π line.
+        return d - period * torch.round(d / period)
+
+    du_dy = _wrap(F.pad(u[2:, :] - u[:-2, :], (0, 0, 1, 1))) / 2.0
+    du_dx = _wrap(F.pad(u[:, 2:] - u[:, :-2], (1, 1, 0, 0))) / 2.0
+    dv_dy = _wrap(F.pad(v[2:, :] - v[:-2, :], (0, 0, 1, 1))) / 2.0
+    dv_dx = _wrap(F.pad(v[:, 2:] - v[:, :-2], (1, 1, 0, 0))) / 2.0
+    col_x = torch.sqrt(du_dx ** 2 + dv_dx ** 2)
+    col_y = torch.sqrt(du_dy ** 2 + dv_dy ** 2)
+    scale = torch.clamp(torch.maximum(col_x, col_y), min=1.0)
+    lod = torch.log2(scale)
+    return torch.clamp(lod, min=0.0, max=float(maxLOD))
+
+
+def view_lod(image, warp, leveln=5, padding_mode='border'):
+    """
+    LOD-aware (mip-map style) forward warp.
+
+    For each output pixel, the local frequency cap is set by the Jacobian
+    norm of the UV map: pixels in regions where the warp is locally
+    contracting (e.g. the inner edge of the conic mirror's polar unwrap)
+    are sampled from a coarser pyramid level so they don't alias. Pixels
+    where the warp is non-contracting sample from level 0 — i.e. the
+    behavior collapses to plain bilinear ``view_simple`` sampling.
+
+    Implementation: build a Gaussian pyramid of ``image``, upsample each
+    level to full resolution and stack along a new pyramid axis to form a
+    (B, C, L, H, W) volume, then sample with a single 3D ``grid_sample``
+    over (u, v, lod). LOD is computed from ``_compute_lod_level``.
+
+    Args:
+        image: Input image (B, C, H, W) or (C, H, W).
+        warp:  Warp field (1, 3, H, W) with UV in [0, 1].
+        leveln: Number of pyramid levels (default 5).
+        padding_mode: Pass-through to grid_sample for out-of-range UV;
+            'border' is preferred over 'zeros' so identity-warp regions
+            don't get blackened at the edges.
+
+    Returns:
+        Warped image with the same leading shape as the input image.
+    """
+    squeeze = False
+    if image.ndim == 3:
+        image = image.unsqueeze(0)
+        squeeze = True
+
+    device = image.device
+    dtype = image.dtype
+    image_f = image.float()
+
+    # Gaussian pyramid: gp[0] = full res, gp[i] = down-sampled by 2^i.
+    gp = [image_f]
+    for _ in range(leveln - 1):
+        gp.append(pyrDown(gp[-1]))
+
+    # Upsample every level back to full res and stack along a pyramid axis.
+    layers = pyrStack(gp, dim=2)  # (B, C, L, H, W)
+    if layers.ndim == 4:
+        layers = layers.unsqueeze(0)
+
+    # Build the (u, v, lod) sampling grid in normalized [-1, 1] coords.
+    warp = warp.to(device=device, dtype=torch.float32)
+    h, w = warp.shape[-2:]
+    L = leveln
+
+    mapping = max(h, w) * warp[:, :2]                  # UV in pixel units
+    lod = _compute_lod_max_col(mapping, maxLOD=L - 1)   # 0 where the warp is non-contracting
+    lod_norm = 2.0 * lod / max(L - 1, 1) - 1.0          # → [-1, 1]
+    lod_norm = lod_norm.unsqueeze(0).unsqueeze(-1)      # (1, H, W, 1)
+
+    uv = warp[:, :2].permute(0, 2, 3, 1)             # (1, H, W, 2)
+    uv = 2.0 * uv - 1.0                              # → [-1, 1]
+
+    # 5D grid_sample expects last dim = (x, y, z) where (x, y, z) → (W, H, D).
+    # Our volume is (N, C, D=L, H, W), so x = u, y = v, z = lod.
+    grid = torch.cat([uv, lod_norm], dim=-1).unsqueeze(1)  # (1, 1, H, W, 3)
+
+    if grid.shape[0] != layers.shape[0]:
+        grid = grid.expand(layers.shape[0], -1, -1, -1, -1)
+
+    warped = F.grid_sample(
+        layers,
+        grid,
+        mode='bilinear',
+        padding_mode=padding_mode,
+        align_corners=True,
+    ).squeeze(2)  # (B, C, H, W)
+
+    if squeeze:
+        warped = warped.squeeze(0)
+    return warped.to(dtype)
+
+
 def view(lp, warp, leveln):
     """
     Forward warp a Laplacian pyramid.
@@ -884,61 +1225,125 @@ def blend_pyramids(lp1, lp2, alpha=0.25):
     return blended_lp
 
 
+def blend_pyramids_masked(lp1, lp2, mask, alpha=0.5):
+    """
+    Mask-weighted Laplacian pyramid blending.
+
+    Treats ``lp1`` as the canonical/identity pyramid (defined everywhere)
+    and ``lp2`` as a partial-view pyramid that is only valid where
+    ``mask > 0``. At each pyramid level, downsamples the mask to that
+    level's resolution and blends:
+
+        out_l = m_l * detail_blend(L1_l, L2_l) + (1 - m_l) * L1_l
+
+    where detail_blend interpolates between standard average and a
+    value-weighted average per the paper (Eqs. 12–15). Downsampling the
+    mask per level gives the paper's partial-view behavior: high-frequency
+    content from ``lp2`` stays inside the mask, while lower-frequency
+    bands transition more smoothly across the boundary.
+
+    Args:
+        lp1: Laplacian pyramid (list of tensors, finest → coarsest).
+        lp2: Laplacian pyramid with the same shapes as lp1.
+        mask: Soft mask at full resolution, shape (1, 1, H, W) or
+            broadcastable to ``lp1[0]``.
+        alpha: Detail-preservation strength inside the mask (0 = avg only,
+            1 = value-weighted only). Default 0.5.
+
+    Returns:
+        Blended Laplacian pyramid (list of tensors).
+    """
+    blended = []
+    for l1, l2 in zip(lp1, lp2):
+        # Resize mask to this level.
+        if l1.ndim == 3:
+            target_hw = l1.shape[-2:]
+            m_in = mask
+            if m_in.ndim == 3:
+                m_in = m_in.unsqueeze(0)
+        else:
+            target_hw = l1.shape[-2:]
+            m_in = mask
+            if m_in.ndim == 3:
+                m_in = m_in.unsqueeze(0)
+
+        m_in = m_in.to(l1.device, dtype=torch.float32)
+        if m_in.shape[-2:] != target_hw:
+            m_l = F.interpolate(m_in, size=target_hw, mode='bilinear', align_corners=True)
+        else:
+            m_l = m_in
+        m_l = m_l.clamp(0.0, 1.0)
+        m_s = m_l * m_l * (3.0 - 2.0 * m_l)  # smoothstep
+
+        # Broadcast mask to channel count.
+        if l1.ndim == 4 and m_s.shape[1] != l1.shape[1]:
+            m_s = m_s.expand(-1, l1.shape[1], -1, -1)
+        elif l1.ndim == 3:
+            # (1, 1, H, W) → (C, H, W)
+            m_s = m_s.expand(-1, l1.shape[0], -1, -1).squeeze(0)
+
+        l1_f = l1.float()
+        l2_f = l2.float()
+
+        avg = (l1_f + l2_f) / 2.0
+        a1 = l1_f.abs()
+        a2 = l2_f.abs()
+        vavg = (a1 * l1_f + a2 * l2_f) / torch.clamp(a1 + a2, min=1e-8)
+        detail = avg + alpha * (vavg - avg)
+
+        out = m_s * detail + (1.0 - m_s) * l1_f
+        blended.append(out.to(l1.dtype))
+    return blended
+
+
 def masked_blend(img1, img2, mask, alpha=0.5):
     """
-    Blend two images everywhere, using the mask to control blend strength.
-    
-    The mask controls the blend type:
-    - mask=1 (inside circle): detail-preserving value-weighted blend
-    - mask=0 (outside circle): simple 50/50 average blend
-    - intermediate values: smooth transition between the two blend types
-    
-    This ensures the entire image is a coherent blend of both inputs,
-    with stronger detail preservation inside the masked region.
-    
+    Mask-weighted blend treating ``img1`` as the always-defined canonical view
+    and ``img2`` as a partial view that is only valid where ``mask > 0``.
+
+    - mask=1: detail-preserving value-weighted blend of img1 and img2.
+    - mask=0: pass img1 through unchanged (img2 is undefined here, so it
+      must not contribute).
+    - intermediate: smooth interpolation between the two.
+
+    For self-overlapping warps (e.g. circular rotations) where img1 ≈ img2
+    outside the masked region, this matches the previous 50/50 behavior to
+    sub-pixel precision. For partial-view warps (e.g. conic mirror) where
+    img2 outside the mask is undefined / spurious, this prevents img2's
+    out-of-region content from leaking into img1.
+
     Args:
-        img1: First image (B, C, H, W) - the "base" image
-        img2: Second image (B, C, H, W) - transformed version (already warped)
-        mask: Soft mask (1, 1, H, W) or (B, 1, H, W), values in [0, 1]
-        alpha: Blending parameter for value-weighted vs standard average inside mask
-    
+        img1: Canonical image (B, C, H, W) - valid everywhere.
+        img2: Warped partial-view image (B, C, H, W) - valid only inside mask.
+        mask: Soft mask (1, 1, H, W) or (B, 1, H, W), values in [0, 1].
+        alpha: Detail-preservation strength inside the mask in [0, 1].
+
     Returns:
-        Blended image (B, C, H, W)
+        Blended image (B, C, H, W).
     """
-    # Ensure proper dimensions
     if mask.shape[0] != img1.shape[0]:
         mask = mask.expand(img1.shape[0], -1, -1, -1)
     if mask.shape[1] != img1.shape[1]:
         mask = mask.expand(-1, img1.shape[1], -1, -1)
-    
+
     mask = mask.to(img1.device, dtype=img1.dtype)
-    
-    # Apply smoothstep to the mask for even smoother transitions
-    # smoothstep(x) = 3x^2 - 2x^3, gives S-curve for values in [0, 1]
-    smooth_mask = mask * mask * (3.0 - 2.0 * mask)
-    
-    # Standard average (used outside the circle)
+    smooth_mask = mask * mask * (3.0 - 2.0 * mask)  # smoothstep
+
     avg_result = (img1 + img2) / 2.0
-    
-    # Value-weighted average (used inside the circle for detail preservation)
+
     abs_img1 = torch.abs(img1)
     abs_img2 = torch.abs(img2)
-    
     numerator = abs_img1 * img1 + abs_img2 * img2
     denominator = abs_img1 + abs_img2
-    
     epsilon = 1e-8
     vavg_result = numerator / torch.clamp(denominator, min=epsilon)
-    
-    # Detail-preserving blend for inside the circle
+
     detail_blend = avg_result + alpha * (vavg_result - avg_result)
-    
-    # Blend everywhere: 
-    # - Inside circle (mask=1): use detail-preserving blend
-    # - Outside circle (mask=0): use simple average
-    # - Transition zone: smooth interpolation
-    result = smooth_mask * detail_blend + (1 - smooth_mask) * avg_result
-    
+
+    # Inside mask: detail-preserving blend.
+    # Outside mask: img1 only — img2 is undefined here.
+    result = smooth_mask * detail_blend + (1.0 - smooth_mask) * img1
+
     return result
 
 

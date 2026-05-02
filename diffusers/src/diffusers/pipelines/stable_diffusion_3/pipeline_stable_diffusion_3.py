@@ -53,12 +53,15 @@ from .lod_new import (
     Laplacian2Gaussian,
     view,
     view_simple,
+    view_lod,
     inverse_view,
     create_identity_warp,
     create_vertical_flip_warp,
     create_circular_mask,
     create_circular_rotation_warp,
+    create_conic_mirror_warp,
     blend_pyramids,
+    blend_pyramids_masked,
     masked_blend,
 )
 
@@ -831,19 +834,26 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         while img2.ndim > 4:
             img2 = img2.squeeze(0)
         
-        # If mask is provided, use masked blending
-        if mask is not None:
-            return masked_blend(img1, img2, mask, alpha=alpha)
-        
-        if use_pyramids:
-            # Build pyramids
+        # If mask is provided AND we're in pyramid mode, do per-level
+        # mask-weighted Laplacian blending — this is the partial-view
+        # blend described in the Looking Glass paper (and is what makes
+        # the conic mirror's annular boundary blend cleanly across bands
+        # instead of leaving a sharp ring of aliased high frequencies).
+        if mask is not None and use_pyramids:
             lp1 = LaplacianPyramid(img1, leveln)
             lp2 = LaplacianPyramid(img2, leveln)
-            
-            # Blend using the function from lod_new
+            blended_lp = blend_pyramids_masked(lp1, lp2, mask, alpha=alpha)
+            gp = Laplacian2Gaussian(blended_lp)
+            return gp[0]
+
+        # If only a mask (no pyramids), fall back to full-res masked blend.
+        if mask is not None:
+            return masked_blend(img1, img2, mask, alpha=alpha)
+
+        if use_pyramids:
+            lp1 = LaplacianPyramid(img1, leveln)
+            lp2 = LaplacianPyramid(img2, leveln)
             blended_lp = blend_pyramids(lp1, lp2, alpha=alpha)
-            
-            # Reconstruct
             gp = Laplacian2Gaussian(blended_lp)
             return gp[0]
         else:
@@ -886,7 +896,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             return torch.flip(noise_sample, [2])
         elif mode == '90flip':
             return torch.rot90(noise_sample, 1, [2, 3])
-        elif mode in ('90rot', '135rot', '180rot'):
+        elif mode in ('90rot', '135rot', '180rot', 'conic'):
             # Use circular rotation warp for rotation transforms
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=False)
         elif mode == 'jigsaw':
@@ -902,7 +912,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             return torch.flip(noise_sample, [2])
         elif mode == '90flip':
             return torch.rot90(noise_sample, -1, [2, 3])
-        elif mode in ('90rot', '135rot', '180rot'):
+        elif mode in ('90rot', '135rot', '180rot', 'conic'):
             # Use circular rotation warp with inverse for rotation transforms
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=True)
         elif mode == 'jigsaw':
@@ -1512,7 +1522,18 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             # 180 degree rotation in a circular region
             angle = -180.0 if inverse else 180.0
             warp, mask = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
-            
+
+        elif transform_type == "conic":
+            # Conic mirror anamorphosis (polar unwrap of an annulus)
+            r_in_ratio = getattr(self, '_conic_r_in_ratio', 0.15)
+            r_out_ratio = getattr(self, '_conic_r_out_ratio', 0.95)
+            warp, mask = create_conic_mirror_warp(
+                h, w,
+                r_in_ratio=r_in_ratio,
+                r_out_ratio=r_out_ratio,
+                inverse=inverse,
+            )
+
         elif transform_type == "jigsaw":
             # Jigsaw puzzle permutation
             from .lod_new import create_jigsaw_warp
@@ -1535,11 +1556,18 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         warp = warp.to(image.device, dtype=torch.float32)
         if mask is not None:
             mask = mask.to(image.device, dtype=image.dtype)
-        
-        # Use simple 2D grid_sample for warping
-        warped = view_simple(image, warp)
-        
+
+        # LOD-aware sampling only for the forward conic direction (rect →
+        # annulus), where local compression near the inner ring would
+        # alias high-frequency content. For the inverse direction
+        # (canonical → rect) and all other transforms we use plain
+        # bilinear so the final view2 stays sharp.
+        if transform_type == "conic" and not inverse:
+            warped = view_lod(image, warp, leveln=5, padding_mode='border')
+        else:
+            warped = view_simple(image, warp)
+
         # Store mask as instance attribute for use in blending
         self._current_warp_mask = mask
-        
+
         return warped.to(image.dtype)
