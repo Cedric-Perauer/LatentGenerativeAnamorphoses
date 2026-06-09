@@ -3,12 +3,8 @@ import os
 import torch
 from diffusers import StableDiffusion3Pipeline
 
-pipe = StableDiffusion3Pipeline.from_pretrained(
-    "stabilityai/stable-diffusion-3.5-medium", torch_dtype=torch.bfloat16
-).to("cuda")
-
 #transform_type = "vertical"
-possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw", "conic"]
+possible_transform_types = ["vertical", "horizontal", "90flip", "90rot", "135rot", "180rot", "jigsaw", "conic", "conic_global"]
 
 parser = argparse.ArgumentParser(description="Generate SD3.5 dual prompts with a shared style.")
 parser.add_argument("--style-prompt", default="a pop art of ", help="Style prefix applied to both prompts.")
@@ -22,11 +18,43 @@ parser.add_argument(
     help="Anamorphosis transform type to apply.",
 )
 parser.add_argument("--seed", type=int, default=1, help="Random seed for generation.")
+parser.add_argument(
+    "--model",
+    default="stabilityai/stable-diffusion-3.5-medium",
+    help="HF repo id or local path of the SD3.5-medium weights (e.g. an ungated mirror).",
+)
+parser.add_argument(
+    "--variant",
+    default=None,
+    help="Optional weights variant to load (e.g. 'fp16').",
+)
+parser.add_argument(
+    "--conic-radius", type=float, default=0.27,
+    help="[conic] circle radius as a fraction of min(H, W).",
+)
+parser.add_argument(
+    "--conic-view2-weight", type=float, default=0.65,
+    help="[conic] blend weight of view 2 inside the circle (0.5 = symmetric; "
+         "higher makes the hidden image stronger but more visible in view 1).",
+)
+parser.add_argument(
+    "--conic-view2-refine", type=float, default=0.8,
+    help="[conic] SDEdit refinement strength for the final image2 "
+         "(0 disables; higher = prettier but less faithful to the exact "
+         "inverse warp).",
+)
 args = parser.parse_args()
 
 style_prompt = args.style_prompt
 transform_type = args.transform
 seed = args.seed
+
+pipe = StableDiffusion3Pipeline.from_pretrained(
+    args.model, torch_dtype=torch.bfloat16, variant=args.variant
+).to("cuda")
+pipe._conic_radius_ratio = args.conic_radius
+pipe._conic_view2_weight = args.conic_view2_weight
+pipe._conic_view2_refine = args.conic_view2_refine
 
 image1, image2 = pipe(
     prompt=f"{style_prompt} {args.prompt1}",
@@ -48,6 +76,14 @@ image1, image2 = pipe(
 
 os.makedirs(args.output_dir, exist_ok=True)
 image1.save(os.path.join(args.output_dir, "generated_image1.png"))
+
+if transform_type == "conic":
+    # The conic image2 is derived by magnifying the inner circle of
+    # image1, so its effective resolution is the circle diameter — save
+    # it at that native size rather than blown up to the full canvas.
+    from PIL import Image as _PILImage
+    d = max(2, int(round(2 * args.conic_radius * 1024 / 2)) * 2)
+    image2 = image2.resize((d, d), _PILImage.LANCZOS)
 image2.save(os.path.join(args.output_dir, "generated_image2.png"))
 
 
@@ -66,6 +102,7 @@ def _save_warp_diagnostics(out_dir, transform, h=1024, w=1024):
             create_vertical_flip_warp,
             create_circular_rotation_warp,
             create_conic_mirror_warp,
+            create_conic_inner_mirror_warp,
             create_jigsaw_warp,
             _compute_lod_max_col,
         )
@@ -114,6 +151,9 @@ def _save_warp_diagnostics(out_dir, transform, h=1024, w=1024):
         return (rgb * 255).clip(0, 255).astype(_np.uint8)
 
     if transform == "conic":
+        warp_f, mask_f = create_conic_inner_mirror_warp(h, w, inverse=False)
+        warp_i, mask_i = create_conic_inner_mirror_warp(h, w, inverse=True)
+    elif transform == "conic_global":
         warp_f, mask_f = create_conic_mirror_warp(h, w, inverse=False)
         warp_i, mask_i = create_conic_mirror_warp(h, w, inverse=True)
     elif transform in ("90rot", "135rot", "180rot"):

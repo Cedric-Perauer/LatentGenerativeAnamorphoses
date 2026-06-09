@@ -36,6 +36,8 @@ from .lod_new import (
     create_identity_warp,
     create_circular_rotation_warp,
     create_conic_mirror_warp,
+    create_conic_inner_mirror_warp,
+    laplacian_warp_inverse,
     create_jigsaw_warp,
     view_simple,
     view_lod,
@@ -711,7 +713,7 @@ class Flux2Pipeline(DiffusionPipeline):
             return torch.flip(noise_sample, [2])
         elif mode == '90flip':
             return torch.rot90(noise_sample, 1, [2, 3])
-        elif mode in ('90rot', '135rot', '180rot', 'conic'):
+        elif mode in ('90rot', '135rot', '180rot', 'conic', 'conic_global'):
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=False)
         elif mode == 'jigsaw':
             return self.apply_laplacian_warp(noise_sample, transform_type='jigsaw', inverse=False)
@@ -725,7 +727,7 @@ class Flux2Pipeline(DiffusionPipeline):
             return torch.flip(noise_sample, [2])
         elif mode == '90flip':
             return torch.rot90(noise_sample, -1, [2, 3])
-        elif mode in ('90rot', '135rot', '180rot', 'conic'):
+        elif mode in ('90rot', '135rot', '180rot', 'conic', 'conic_global'):
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=True)
         elif mode == 'jigsaw':
             return self.apply_laplacian_warp(noise_sample, transform_type='jigsaw', inverse=True)
@@ -764,14 +766,41 @@ class Flux2Pipeline(DiffusionPipeline):
             angle = -180.0 if inverse else 180.0
             warp, mask = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
         elif transform_type == "conic":
+            # Conic mirror: an inner circle of view 1 hides the WHOLE of
+            # view 2 (radial inversion + scale, reach following the square
+            # boundary). Outside the circle view 1 passes through.
+            radius_ratio = getattr(self, '_conic_radius_ratio', 0.27)
+            cache = getattr(self, "_conic_warp_cache", {})
+            for inv_flag in (False, True):
+                key = ("inner", h, w, radius_ratio, inv_flag)
+                if key not in cache:
+                    cache[key] = create_conic_inner_mirror_warp(
+                        h, w,
+                        radius_ratio=radius_ratio,
+                        inverse=inv_flag,
+                    )
+                    self._conic_warp_cache = cache
+            warp, mask = cache[("inner", h, w, radius_ratio, inverse)]
+            # The view2 <- circle sampling field, needed by the inverse
+            # Laplacian warping below when going pred2 -> canonical.
+            conic_warp_inv = cache[("inner", h, w, radius_ratio, True)][0]
+
+        elif transform_type == "conic_global":
+            # Paper-style full-canvas conic anamorphosis (ray-traced cone,
+            # whole image is the mirror view).
             r_in_ratio = getattr(self, '_conic_r_in_ratio', 0.15)
             r_out_ratio = getattr(self, '_conic_r_out_ratio', 0.95)
-            warp, mask = create_conic_mirror_warp(
-                h, w,
-                r_in_ratio=r_in_ratio,
-                r_out_ratio=r_out_ratio,
-                inverse=inverse,
-            )
+            cache = getattr(self, "_conic_warp_cache", {})
+            cache_key = ("global", h, w, r_in_ratio, r_out_ratio, inverse)
+            if cache_key not in cache:
+                cache[cache_key] = create_conic_mirror_warp(
+                    h, w,
+                    r_in_ratio=r_in_ratio,
+                    r_out_ratio=r_out_ratio,
+                    inverse=inverse,
+                )
+                self._conic_warp_cache = cache
+            warp, mask = cache[cache_key]
         elif transform_type == "jigsaw":
             jigsaw_seed = getattr(self, '_jigsaw_seed', 42)
             cache = getattr(self, "_jigsaw_warp_cache", {})
@@ -790,18 +819,46 @@ class Flux2Pipeline(DiffusionPipeline):
             mask = mask.to(image.device, dtype=image.dtype)
 
         if transform_type == "conic" and not inverse:
-            warped = view_lod(image, warp, leveln=5, padding_mode='border')
+            # Paper-style inverse Laplacian warping (suppl. A.2): bring
+            # view 2 into the canonical circle by backpropagating through
+            # the view2 <- circle sampling map. Unlike direct sampling,
+            # this scatters content into the correct frequency bands, so
+            # view 2's structure survives the strong compression (and the
+            # center <-> rim inversion's azimuthal stretch) instead of
+            # arriving with drained Laplacian magnitudes.
+            warped = laplacian_warp_inverse(
+                image.float(),
+                conic_warp_inv.to(image.device, dtype=torch.float32),
+                leveln=6,
+            )
+        elif transform_type == "conic" or (
+                transform_type == "conic_global" and not inverse):
+            warped = view_lod(image, warp, leveln=6, padding_mode='border')
         else:
             warped = view_simple(image, warp)
 
-        if (transform_type == "conic" and inverse and mask is not None
+        # Confine the inner-circle conic warp strictly to its disk: the
+        # warp's sampling region extends a feather-width past the rim (so
+        # the rim blend has warped content on both sides), which would
+        # otherwise leave a thin ring of warped content outside the circle
+        # in the raw output. Soft-composite with the disk mask so outside
+        # the circle the image passes through untouched.
+        if transform_type == "conic" and mask is not None:
+            m_soft = mask.to(warped.device, dtype=warped.dtype)
+            if m_soft.shape[0] != warped.shape[0]:
+                m_soft = m_soft.expand(warped.shape[0], -1, -1, -1)
+            if m_soft.shape[1] != warped.shape[1]:
+                m_soft = m_soft.expand(-1, warped.shape[1], -1, -1)
+            warped = m_soft * warped + (1.0 - m_soft) * image.to(warped.dtype)
+
+        if (transform_type == "conic_global" and inverse and mask is not None
                 and getattr(self, "_apply_conic_soften", False)):
-            warped = soften_inverse_conic(warped, mask)
+            warped = soften_inverse_conic(warped, mask, value_range=(-1.0, 1.0))
         self._current_warp_mask = mask
 
         return warped.to(image.dtype)
 
-    def lwp_blend(self, img1, img2, alpha=0.5, leveln=5, use_pyramids=True, mask=None):
+    def lwp_blend(self, img1, img2, alpha=0.5, leveln=5, use_pyramids=True, mask=None, w2=0.5):
         while img1.ndim > 4:
             img1 = img1.squeeze(0)
         while img2.ndim > 4:
@@ -813,13 +870,14 @@ class Flux2Pipeline(DiffusionPipeline):
         if mask is not None and use_pyramids:
             lp1 = LaplacianPyramid(img1, leveln)
             lp2 = LaplacianPyramid(img2, leveln)
-            blended_lp = blend_pyramids_masked(lp1, lp2, mask, alpha=alpha)
+            blended_lp = blend_pyramids_masked(lp1, lp2, mask, alpha=alpha, w2=w2)
             gp = Laplacian2Gaussian(blended_lp)
-            blended = gp[0]
-            hard_mask = (mask > 0.5).to(blended.dtype)
-            if hard_mask.dim() == 4 and hard_mask.shape[1] != blended.shape[1]:
-                hard_mask = hard_mask.expand(-1, blended.shape[1], -1, -1)
-            return hard_mask * blended + (1.0 - hard_mask) * img1
+            # Return the multiband reconstruction directly: the per-level
+            # mask pyramid already passes img1 through outside the mask
+            # with a band-appropriate smooth transition at the boundary.
+            # A hard (mask > 0.5) composite here would undo exactly that
+            # low-frequency smoothing and re-create a visible seam.
+            return gp[0]
 
         if mask is not None:
             blended = masked_blend(img1, img2, mask, alpha=alpha)
@@ -1011,6 +1069,16 @@ class Flux2Pipeline(DiffusionPipeline):
         """
 
         lwp_use_pyramids = True if lwp else False
+        # The conic mirror compresses the whole of view 2 into a small
+        # circle, draining its Laplacian magnitudes; weight it up inside
+        # the blend (and rely less on magnitude selection) so the hidden
+        # view survives against the canonical view's high-contrast detail.
+        if transform_type == "conic":
+            lwp_alpha = getattr(self, '_conic_blend_alpha', 0.3)
+            lwp_w2 = getattr(self, '_conic_view2_weight', 0.65)
+        else:
+            lwp_alpha = 0.5
+            lwp_w2 = 0.5
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
@@ -1234,7 +1302,7 @@ class Flux2Pipeline(DiffusionPipeline):
                         else:
                             clean_img_pred2 = self.flip_tensor(clean_img_pred2, mode=transform_type)
                             blend_mask = None
-                        blended_img = self.lwp_blend(clean_img_pred1, clean_img_pred2, use_pyramids=lwp_use_pyramids, mask=blend_mask)
+                        blended_img = self.lwp_blend(clean_img_pred1, clean_img_pred2, use_pyramids=lwp_use_pyramids, mask=blend_mask, alpha=lwp_alpha, w2=lwp_w2)
                     else:
                         blended_img = clean_img_pred1
 
@@ -1249,7 +1317,7 @@ class Flux2Pipeline(DiffusionPipeline):
                         else:
                             corr2_unpatch = self.flip_tensor(corr2_unpatch, mode=transform_type)
                             blend_mask = None
-                        blended_correction_unpatch = self.lwp_blend(corr1_unpatch, corr2_unpatch, use_pyramids=lwp_use_pyramids, mask=blend_mask)
+                        blended_correction_unpatch = self.lwp_blend(corr1_unpatch, corr2_unpatch, use_pyramids=lwp_use_pyramids, mask=blend_mask, alpha=lwp_alpha, w2=lwp_w2)
                     else:
                         blended_correction_unpatch = self._unpatchify_latents(correction_term)
 

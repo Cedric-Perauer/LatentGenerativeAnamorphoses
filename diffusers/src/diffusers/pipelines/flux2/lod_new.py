@@ -645,6 +645,100 @@ def create_conic_mirror_warp(
     return warp, mask
 
 
+def create_conic_inner_mirror_warp(
+    height,
+    width,
+    radius_ratio=0.27,
+    feather_ratio=0.08,
+    inverse=False,
+):
+    """Conic-mirror anamorphosis: an inner circle of view 1 hides the
+    WHOLE of view 2.
+
+    View 1 (the canonical painting) is modified only inside the circle of
+    radius R = radius_ratio * min(H, W). View 2 (what the cone mirror
+    shows) is a full image of its own — as in the LookingGlass paper,
+    where the mirror view fills the camera frame. The two are related by
+    the cone's radial inversion plus a scale: a view-2 pixel at polar
+    coords (rho, theta) corresponds to the view-1 circle point at
+
+        r(rho, theta) = R * (1 - rho / edge(theta)),
+
+    where edge is the inscribed-circle radius of view 2 — view 2's
+    center shows the circle rim and
+    view 2's boundary shows the circle center (the conic mirror's
+    center <-> rim inversion), with the full square canvas of view 2
+    compressed into the circle. Outside the circle, view 1 passes through
+    untouched.
+
+    Constraining the whole of view 2 (rather than only its central disk)
+    is what keeps the second prompt effective when the circle is small:
+    every pixel of the view-2 prediction participates in the blend.
+
+    Directions (matching the other warps in this module):
+      - inverse=False: dest = view-1/print space. Circle pixels sample
+        view 2 at rho = edge(theta) * (1 - r / R); identity outside.
+        mask = feathered disk (the blend region).
+      - inverse=True:  dest = view-2/mirror space. Every pixel samples the
+        view-1 circle at r(rho, theta). mask = all-ones (view 2 is fully
+        defined; no confinement).
+
+    Returns:
+        warp: (1, 3, H, W) UV warp field with values in [0, 1].
+        mask: (1, 1, H, W) blend mask in [0, 1].
+    """
+    cy = (height - 1) / 2.0
+    cx = (width - 1) / 2.0
+    R = radius_ratio * min(height, width)
+    feather = max(1.0, feather_ratio * R)
+
+    y = torch.arange(height).float().view(-1, 1).expand(height, width)
+    x = torch.arange(width).float().view(1, -1).expand(height, width)
+    dx = x - cx
+    dy = y - cy
+    r = torch.sqrt(dx * dx + dy * dy)
+    safe_r = torch.clamp(r, min=1e-6)
+
+    # Radial reach in view-2 space: the inscribed-circle radius. A
+    # constant reach keeps the map rotationally symmetric — following the
+    # square boundary instead (edge(theta)) puts derivative kinks along
+    # the diagonals that show up as an X-shaped seam in both views.
+    reach = 0.5 * min(height, width)
+
+    if inverse:
+        # View 2 samples the view-1 circle: r(rho) = R * (1 - rho / reach).
+        # Pixels beyond the inscribed circle (the corners) clamp to the
+        # reach boundary, extending the rim content radially outward.
+        r_src = R * (1.0 - torch.clamp(r, max=reach) / reach)
+        scale = r_src / safe_r
+        region = torch.ones_like(r, dtype=torch.bool)
+        mask = torch.ones(height, width)
+    else:
+        # The view-1 circle samples view 2: rho(r) = reach * (1 - r / R).
+        rho = reach * (1.0 - r / R)
+        scale = rho.clamp(min=0.0) / safe_r
+        region = r <= R + feather
+        # Soft disk mask: 1 inside, 0 outside, linear ramp across a
+        # 2*feather band centered on the rim (same convention as
+        # create_circular_rotation_warp). lwp()'s blend and the pipeline's
+        # confinement composite both key off this.
+        mask = torch.clamp(((R - r) + feather) / (2.0 * feather), 0.0, 1.0)
+
+    x_src = cx + dx * scale
+    y_src = cy + dy * scale
+    u_id = x / (width - 1)
+    v_id = y / (height - 1)
+    u_src = (x_src / (width - 1)).clamp(0.0, 1.0)
+    v_src = (y_src / (height - 1)).clamp(0.0, 1.0)
+    warp_u = torch.where(region, u_src, u_id)
+    warp_v = torch.where(region, v_src, v_id)
+
+    warp = torch.stack([warp_u, warp_v], dim=0).unsqueeze(0)  # (1, 2, H, W)
+    third_channel = torch.zeros(1, 1, height, width)
+    warp = torch.cat([warp, third_channel], dim=1)            # (1, 3, H, W)
+    return warp, mask.unsqueeze(0).unsqueeze(0)
+
+
 # =============================================================================
 # LOD Level Computation
 # =============================================================================
@@ -683,24 +777,45 @@ def _compute_lod_level(uv_map: torch.Tensor, maxLOD: int) -> torch.Tensor:
 # Pyramid Operations
 # =============================================================================
 
+_BURT_KERNEL_1D = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0]) / 16.0
+
+
 def pyrDown(x):
-    """Downsample by factor of 2 using averaging."""
+    """Downsample by factor of 2 with a 5-tap Gaussian prefilter (the
+    Burt-Adelson kernel [1, 4, 6, 4, 1] / 16, applied separably with
+    reflect padding) followed by stride-2 subsampling.
+
+    The Gaussian prefilter matters for the LOD-aware warps: a plain 2x2
+    box average aliases, and when a radially-monotone LOD map samples
+    across the stacked pyramid levels that aliasing shows up as concentric
+    banding in the warped output. Inputs containing NaNs (partial views)
+    fall back to the NaN-aware 2x2 averaging, where a Gaussian convolution
+    would smear NaNs into valid pixels.
+    """
     squeeze = False
     if x.ndim == 3:
         x = x.unsqueeze(0)
         squeeze = True
-    
+
     b, c, h, w = x.shape
     h_even = h - (h % 2)
     w_even = w - (w % 2)
     x = x[:, :, :h_even, :w_even]
-    
-    # Average 2x2 blocks
-    x_reshaped = x.view(b, c, h_even // 2, 2, w_even // 2, 2)
-    x_permuted = x_reshaped.permute(0, 1, 2, 4, 3, 5)
-    x_blocks = x_permuted.reshape(b, c, h_even // 2, w_even // 2, 4)
-    out = torch.nanmean(x_blocks, dim=-1)
-    
+
+    if torch.isnan(x).any():
+        # NaN-aware 2x2 block average (legacy path for partial views).
+        x_reshaped = x.view(b, c, h_even // 2, 2, w_even // 2, 2)
+        x_permuted = x_reshaped.permute(0, 1, 2, 4, 3, 5)
+        x_blocks = x_permuted.reshape(b, c, h_even // 2, w_even // 2, 4)
+        out = torch.nanmean(x_blocks, dim=-1)
+    else:
+        k = _BURT_KERNEL_1D.to(device=x.device, dtype=x.dtype)
+        kx = k.view(1, 1, 1, 5).expand(c, 1, 1, 5)
+        ky = k.view(1, 1, 5, 1).expand(c, 1, 5, 1)
+        out = F.conv2d(F.pad(x, (2, 2, 0, 0), mode='reflect'), kx, groups=c)
+        out = F.conv2d(F.pad(out, (0, 0, 2, 2), mode='reflect'), ky, groups=c)
+        out = out[:, :, ::2, ::2]
+
     if squeeze:
         out = out.squeeze(0)
     return out
@@ -1004,7 +1119,8 @@ def _compute_lod_max_col(uv_map, maxLOD):
 
 def soften_inverse_conic(recovered, mask, apex_sigma=60.0,
                          outside_blur_sigma=20.0, outside_fade_dist=40.0,
-                         edge_blend_sigma=6.0):
+                         edge_blend_sigma=6.0, value_range=(0.0, 1.0),
+                         apex_dilate_frac=0.06):
     """Post-process the conic-mirror inverse-warp result so it matches the
     benchmark inverse_correct.png style:
 
@@ -1023,6 +1139,11 @@ def soften_inverse_conic(recovered, mask, apex_sigma=60.0,
         recovered: (B, C, H, W) torch tensor — output of view_*.
         mask:      (1, 1, H, W) torch tensor — encoded inverse mask from
                    ``create_conic_mirror_warp(inverse=True)``.
+        value_range: (low, high) value range of ``recovered``. The pipeline
+                   calls this on VAE-decode-space images in [-1, 1]; the
+                   test scripts use [0, 1]. All blending happens in a
+                   normalized [0, 1] domain (so "fade to black" fades to
+                   ``low``) and the result is mapped back to the input range.
 
     Returns:
         (B, C, H, W) tensor with the same dtype as ``recovered``.
@@ -1032,6 +1153,9 @@ def soften_inverse_conic(recovered, mask, apex_sigma=60.0,
     if img_b.ndim == 3:
         img_b = img_b.unsqueeze(0)
     B, C, H, W = img_b.shape
+
+    lo, hi = float(value_range[0]), float(value_range[1])
+    img_b = (img_b - lo) / (hi - lo)
 
     img_np_b = img_b.clamp(0, 1).float().cpu().numpy()  # (B, C, H, W)
     m = mask[0, 0].clamp(0, 1).float().cpu().numpy().astype(np.float32)
@@ -1046,7 +1170,23 @@ def soften_inverse_conic(recovered, mask, apex_sigma=60.0,
             img_out[b,  c] = scipy.ndimage.gaussian_filter(img_np_b[b, c], sigma=outside_blur_sigma)
 
     # Apex weight: take the apex-hole region directly from the encoded mask.
-    apex_hole = ((m > 0.3) & (m < 0.7)).astype(np.float32)
+    # The large connected hole(s) — the true apex hole under the cone — get
+    # dilated outward, because the inverse warp's scatter density collapses
+    # in a band AROUND the hole (extreme radial stretching) leaving radial
+    # streaks the blur must also cover. Small speckle holes scattered over
+    # the disk (isolated scatter misses) are left undilated; blanketing
+    # them would blur the entire recovered image.
+    apex_hole = ((m > 0.3) & (m < 0.7))
+    dilate_px = max(1, int(round(apex_dilate_frac * max(H, W))))
+    labels, n_comp = scipy.ndimage.label(apex_hole)
+    if n_comp > 0 and dilate_px > 1:
+        sizes = scipy.ndimage.sum(apex_hole, labels, index=np.arange(1, n_comp + 1))
+        big_ids = np.flatnonzero(sizes >= 5e-4 * H * W) + 1
+        if big_ids.size:
+            big = np.isin(labels, big_ids)
+            big = scipy.ndimage.binary_dilation(big, iterations=dilate_px)
+            apex_hole = apex_hole | big
+    apex_hole = apex_hole.astype(np.float32)
     apex_w = scipy.ndimage.gaussian_filter(apex_hole, sigma=20.0)
     apex_w = np.clip(apex_w, 0.0, 1.0)
     inside_content = img_np_b * (1.0 - apex_w[None, None]) + img_apex * apex_w[None, None]
@@ -1065,7 +1205,7 @@ def soften_inverse_conic(recovered, mask, apex_sigma=60.0,
     soft_m = np.clip(soft_m, 0.0, 1.0)
 
     out = soft_m[None, None] * inside_content + (1.0 - soft_m[None, None]) * outside_content
-    out = np.clip(out, 0, 1).astype(np.float32)
+    out = np.clip(out, 0, 1).astype(np.float32) * (hi - lo) + lo
     return torch.from_numpy(out).to(recovered.device, dtype=out_dtype)
 
 
@@ -1340,7 +1480,7 @@ def blend_pyramids(lp1, lp2, alpha=0.25):
     return blended_lp
 
 
-def blend_pyramids_masked(lp1, lp2, mask, alpha=0.5):
+def blend_pyramids_masked(lp1, lp2, mask, alpha=0.5, w2=0.5):
     """
     Mask-weighted Laplacian pyramid blending.
 
@@ -1368,26 +1508,31 @@ def blend_pyramids_masked(lp1, lp2, mask, alpha=0.5):
     Returns:
         Blended Laplacian pyramid (list of tensors).
     """
-    blended = []
-    for l1, l2 in zip(lp1, lp2):
-        # Resize mask to this level.
-        if l1.ndim == 3:
-            target_hw = l1.shape[-2:]
-            m_in = mask
-            if m_in.ndim == 3:
-                m_in = m_in.unsqueeze(0)
-        else:
-            target_hw = l1.shape[-2:]
-            m_in = mask
-            if m_in.ndim == 3:
-                m_in = m_in.unsqueeze(0)
+    # Build the mask's Gaussian pyramid (Burt-Adelson multiband blending):
+    # each level is pyrDown-ed and re-smoothed with a small box filter that
+    # COMPOUNDS down the pyramid, so the blend transition is a few pixels
+    # wide at every level — progressively wider in absolute terms at
+    # coarser levels. (Bilinearly resizing the full-res mask instead — the
+    # previous behavior — keeps the transition at a fixed absolute width,
+    # which is sub-pixel at coarse levels: the multiband blend then
+    # degenerates to a hard cut and the seam stays visible.)
+    m = mask
+    if m.ndim == 3:
+        m = m.unsqueeze(0)
+    m = m.to(lp1[0].device, dtype=torch.float32).clamp(0.0, 1.0)
+    mask_levels = []
+    for l1 in lp1:
+        target_hw = tuple(l1.shape[-2:])
+        if tuple(m.shape[-2:]) != target_hw:
+            m = pyrDown(m)
+            if tuple(m.shape[-2:]) != target_hw:
+                m = F.interpolate(m, size=target_hw, mode='bilinear', align_corners=True)
+        m = F.avg_pool2d(m, kernel_size=5, stride=1, padding=2).clamp(0.0, 1.0)
+        mask_levels.append(m)
 
-        m_in = m_in.to(l1.device, dtype=torch.float32)
-        if m_in.shape[-2:] != target_hw:
-            m_l = F.interpolate(m_in, size=target_hw, mode='bilinear', align_corners=True)
-        else:
-            m_l = m_in
-        m_l = m_l.clamp(0.0, 1.0)
+    blended = []
+    for i, (l1, l2) in enumerate(zip(lp1, lp2)):
+        m_l = mask_levels[i]
         m_s = m_l * m_l * (3.0 - 2.0 * m_l)  # smoothstep
 
         # Broadcast mask to channel count.
@@ -1400,9 +1545,17 @@ def blend_pyramids_masked(lp1, lp2, mask, alpha=0.5):
         l1_f = l1.float()
         l2_f = l2.float()
 
-        avg = (l1_f + l2_f) / 2.0
-        a1 = l1_f.abs()
-        a2 = l2_f.abs()
+        # ``w2`` weights the partial view (lp2) against the canonical view
+        # inside the mask. 0.5 is the symmetric paper blend; raising it
+        # compensates transforms whose warp compresses lp2's content (e.g.
+        # the conic mirror squeezing a full image into a small circle),
+        # which drains its Laplacian magnitudes so a symmetric — and
+        # especially a magnitude-weighted — blend would systematically
+        # favor lp1.
+        w1 = 1.0 - w2
+        avg = w1 * l1_f + w2 * l2_f
+        a1 = w1 * l1_f.abs()
+        a2 = w2 * l2_f.abs()
         vavg = (a1 * l1_f + a2 * l2_f) / torch.clamp(a1 + a2, min=1e-8)
         detail = avg + alpha * (vavg - avg)
 

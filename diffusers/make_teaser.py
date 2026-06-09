@@ -63,7 +63,7 @@ parser.add_argument('--caption1', type=str, default='',
                     help='Optional caption shown beneath image1 during the opening hold')
 parser.add_argument('--caption2', type=str, default='',
                     help='Optional caption shown beneath the final frame during the closing hold')
-parser.add_argument('--mode', choices=['jigsaw', 'inner_circle', 'rotate'], default='jigsaw',
+parser.add_argument('--mode', choices=['jigsaw', 'inner_circle', 'rotate', 'conic'], default='jigsaw',
                     help='Which illusion type to animate')
 parser.add_argument('--rotation', type=float, default=90.0,
                     help='[inner_circle / rotate] degrees of rotation to animate; +90 = CCW ("to the left"), -90 = CW')
@@ -79,7 +79,12 @@ print(f'Mode: {args.mode}\nSource 1: {args.img1}\nSource 2: {args.img2}\nOutput:
 
 # ---- load images ----
 img1 = np.array(Image.open(args.img1).convert('RGB'))
-img2 = np.array(Image.open(args.img2).convert('RGB'))
+img2_pil = Image.open(args.img2).convert('RGB')
+if args.mode == 'conic' and img2_pil.size != (IM_SIZE, IM_SIZE):
+    # The conic image2 is saved at its native (circle-diameter) resolution;
+    # upscale it to the canvas size for the animation's final fade target.
+    img2_pil = img2_pil.resize((IM_SIZE, IM_SIZE), Image.LANCZOS)
+img2 = np.array(img2_pil)
 assert img1.shape == img2.shape == (IM_SIZE, IM_SIZE, 3), \
     f'Both images must be {IM_SIZE}x{IM_SIZE} RGB; got {img1.shape} and {img2.shape}'
 
@@ -295,6 +300,77 @@ elif args.mode == 'inner_circle':
         rotated = np.array(img1_pil.rotate(angle, resample=Image.BICUBIC),
                            dtype=np.float32)
         composed = rotated * disk_alpha + img1_f * (1.0 - disk_alpha)
+        composed = np.clip(composed, 0.0, 255.0).astype(np.uint8)
+
+        canvas = Image.new('RGB', (CANVAS_SIZE, CANVAS_SIZE), (255, 255, 255))
+        canvas.paste(Image.fromarray(composed), (img_offset, img_offset))
+        draw_caption(canvas, caption)
+        if OUT_SIZE != CANVAS_SIZE:
+            canvas = canvas.resize((OUT_SIZE, OUT_SIZE), Image.LANCZOS)
+        return np.array(canvas)
+
+elif args.mode == 'conic':
+    # Conic-mirror anamorphosis: the inner circle of img1 (the painting)
+    # hides the WHOLE of img2 (the rectified mirror view, a full image).
+    # We animate a full-canvas UV morph from identity (s=0) to the
+    # circle-sampling conic map (s=1, the same map the pipeline uses), so
+    # the frame zooms into the circle while unrolling the radial
+    # inversion; near the end we cross-fade to img2's clean content,
+    # landing exactly on generated image 2.
+    import sys as _sys
+    import torch
+    import torch.nn.functional as TF
+    _sys.path.insert(0, str(ROOT / 'src'))
+    from diffusers.pipelines.stable_diffusion_3.lod_new import (
+        create_conic_inner_mirror_warp,
+    )
+
+    CONIC_DISK_RATIO = 0.27
+    CONIC_FADE_START = 0.8   # progress at which the frame fades to img2
+    # Peak differential twist (radians) applied mid-morph. The conic map
+    # reverses the radial direction (img2's center shows the circle rim),
+    # so a plain interpolation to identity passes through a state where
+    # the radial map is locally constant — rendering as pure radial
+    # streaks. A radius-proportional rotation of the source points,
+    # ramped in and back out with sin(pi*s), shears that degenerate
+    # moment into spirals instead; both endpoints stay exact.
+    CONIC_TWIST = np.deg2rad(150.0)
+
+    warp_i, _ = create_conic_inner_mirror_warp(
+        IM_SIZE, IM_SIZE, radius_ratio=CONIC_DISK_RATIO, inverse=True)
+    uv_conic = warp_i[0, :2].float()                      # (2, H, W) in [0, 1]
+    yy_n = torch.linspace(0, 1, IM_SIZE).view(-1, 1).expand(IM_SIZE, IM_SIZE)
+    xx_n = torch.linspace(0, 1, IM_SIZE).view(1, -1).expand(IM_SIZE, IM_SIZE)
+    uv_id = torch.stack([xx_n, yy_n], dim=0)              # (2, H, W)
+    # Destination radius normalized to the half-canvas drives the twist.
+    twist_w = (torch.sqrt((xx_n - 0.5) ** 2 + (yy_n - 0.5) ** 2) / 0.5).clamp(0.0, 1.5)
+
+    img1_f = img1.astype(np.float32)
+    img2_f = img2.astype(np.float32)
+    img1_t = torch.from_numpy(img1_f).permute(2, 0, 1).unsqueeze(0)   # (1, 3, H, W)
+    print(f'Conic mode: circle r={int(CONIC_DISK_RATIO * IM_SIZE)}px, full-canvas '
+          f'uv morph identity -> conic mirror, fade to img2 from t={CONIC_FADE_START}')
+
+    def render_frame_at_t(t, caption=''):
+        uv_t = (1.0 - t) * uv_id + t * uv_conic
+        # Differential twist: rotate each source point around the image
+        # center by an angle proportional to the destination radius.
+        phi = CONIC_TWIST * float(np.sin(np.pi * t)) * twist_w
+        cos_p, sin_p = torch.cos(phi), torch.sin(phi)
+        du = uv_t[0] - 0.5
+        dv = uv_t[1] - 0.5
+        uv_t = torch.stack([
+            cos_p * du - sin_p * dv + 0.5,
+            sin_p * du + cos_p * dv + 0.5,
+        ], dim=0)
+        grid = (2.0 * uv_t - 1.0).permute(1, 2, 0).unsqueeze(0)       # (1, H, W, 2)
+        warped = TF.grid_sample(img1_t, grid, mode='bilinear',
+                                padding_mode='border', align_corners=True)
+        warped = warped[0].permute(1, 2, 0).numpy()                   # (H, W, 3)
+
+        fade = min(1.0, max(0.0, (t - CONIC_FADE_START) / (1.0 - CONIC_FADE_START)))
+        fade = smoothstep(fade)
+        composed = (1.0 - fade) * warped + fade * img2_f
         composed = np.clip(composed, 0.0, 255.0).astype(np.uint8)
 
         canvas = Image.new('RGB', (CANVAS_SIZE, CANVAS_SIZE), (255, 255, 255))

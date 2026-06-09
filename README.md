@@ -4,7 +4,7 @@ An implementation of **2D latent generative anamorphoses** using Stable Diffusio
 
 This project generates **anamorphic images** — single images that reveal different content when viewed from different perspectives or transformations. For example, an image that looks like Einstein when viewed normally, but reveals Marilyn Monroe when rotated or rearranged.
 
-> **Note:** This implementation includes the basic 2D transformations suggested in the LookingGlass paper, such as **circular rotations** (90°, 135°, 180°), **vertical/horizontal flipping**, and the **jigsaw permutation** from Geng et al. The full 3D anamorphosis features from the original paper are not included.
+> **Note:** This implementation includes the basic 2D transformations suggested in the LookingGlass paper, such as **circular rotations** (90°, 135°, 180°), **vertical/horizontal flipping**, the **jigsaw permutation** from Geng et al., and a **conic mirror** anamorphosis (inner-disk cone reflection by default; the paper's full-canvas ray-traced variant is available as `conic_global`).
 
 
 | Jigsaw Puzzle : View 1 (Cat) | Jigsaw Puzzle : View 2 (Puppy) |
@@ -135,6 +135,8 @@ python flux2_dev.py \
 | `135rot` | 135° circular rotation in center region |
 | `180rot` | 180° circular rotation in center region |
 | `jigsaw` | Jigsaw puzzle permutation (from [Geng et al.](https://arxiv.org/abs/2311.17919)) — rearranging tiles reveals second image |
+| `conic` | Conic mirror on an inner circle — the circle of `generated_image1` anamorphically hides the WHOLE of `generated_image2` (the rectified mirror view, a full image) via the cone's radial inversion (center ↔ rim) plus scale. Outside the circle, view 1 is untouched. Tune with `--conic-radius` (default 0.27) and `--conic-view2-weight` (default 0.65; lower hides the second image better, higher makes it crisper) |
+| `conic_global` | Paper-style full-canvas conic anamorphosis (ray-traced cone): `generated_image2` is the flat painting, `generated_image1` the top-down mirror view |
 
 ---
 
@@ -221,6 +223,35 @@ python flux2_dev.py \
 |:---:|:---:|
 | <img src="diffusers/outputs/parrot_cave/generated_image1.png" width="512"/> | <img src="diffusers/outputs/parrot_cave/generated_image2.png" width="512"/> |
 
+
+### Conic mirror transform: Earth ↔ Turtle
+
+- Style-Prompt : "an expressionist art of"
+- Prompt1 : "a satellite view of the Earth" (the full painting)
+- Prompt2 : "a turtle" (the mirror view hidden in the inner circle)
+
+| View 1 (Earth painting) | View 2 (conic mirror view: Turtle) |
+|:---:|:---:|
+| <img src="diffusers/outputs_sd35/earth_turtle/generated_image1.png" width="512"/> | <img src="diffusers/outputs_sd35/earth_turtle/generated_image2.png" width="512"/> |
+
+The inner circle of view 1 anamorphically hides the whole of view 2 through
+the cone's radial inversion (view 2's center corresponds to the circle rim).
+Since view 2 is derived by magnifying the circle, it is saved at its native
+resolution (the circle diameter, e.g. 552px for `--conic-radius 0.27`).
+The pred2 → canonical direction uses the paper's inverse Laplacian warping
+(gradient scatter into frequency-correct pyramid bands), which is what keeps
+the hidden image recognizable under the strong compression. The paper's
+full-canvas variant is available as `--transform conic_global`.
+
+Animate the illusion (zooming into the circle while it unrolls into the
+mirror view) with:
+
+```bash
+cd diffusers
+python make_teaser.py --mode conic \
+  --img1 outputs_sd35/earth_turtle/generated_image1.png \
+  --img2 outputs_sd35/earth_turtle/generated_image2.png
+```
 
 ### 90 degree rotation transform: Man ↔ Camp Fire 
 

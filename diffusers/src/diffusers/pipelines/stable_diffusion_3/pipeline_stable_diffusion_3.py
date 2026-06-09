@@ -61,6 +61,8 @@ from .lod_new import (
     create_circular_mask,
     create_circular_rotation_warp,
     create_conic_mirror_warp,
+    create_conic_inner_mirror_warp,
+    laplacian_warp_inverse,
     blend_pyramids,
     blend_pyramids_masked,
     masked_blend,
@@ -806,7 +808,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
 
         return image_embeds.to(device=device)
     
-    def lwp(self, img1, img2, alpha=0.5, leveln=5, use_pyramids=True, mask=None):
+    def lwp(self, img1, img2, alpha=0.5, leveln=5, use_pyramids=True, mask=None, w2=0.5):
         """
         Laplacian Weighted Pooling with combined averaging.
         
@@ -843,16 +845,14 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         if mask is not None and use_pyramids:
             lp1 = LaplacianPyramid(img1, leveln)
             lp2 = LaplacianPyramid(img2, leveln)
-            blended_lp = blend_pyramids_masked(lp1, lp2, mask, alpha=alpha)
+            blended_lp = blend_pyramids_masked(lp1, lp2, mask, alpha=alpha, w2=w2)
             gp = Laplacian2Gaussian(blended_lp)
-            blended = gp[0]
-            # Hard composite with the full-res binary mask so the
-            # cone silhouette has a strict boundary (no canoe content
-            # bleeding past the disk through the coarse-level mask blur).
-            hard_mask = (mask > 0.5).to(blended.dtype)
-            if hard_mask.dim() == 4 and hard_mask.shape[1] != blended.shape[1]:
-                hard_mask = hard_mask.expand(-1, blended.shape[1], -1, -1)
-            return hard_mask * blended + (1.0 - hard_mask) * img1
+            # Return the multiband reconstruction directly: the per-level
+            # mask pyramid already passes img1 through outside the mask
+            # with a band-appropriate smooth transition at the boundary.
+            # A hard (mask > 0.5) composite here would undo exactly that
+            # low-frequency smoothing and re-create a visible seam.
+            return gp[0]
 
         # If only a mask (no pyramids), fall back to full-res masked blend.
         if mask is not None:
@@ -908,7 +908,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             return torch.flip(noise_sample, [2])
         elif mode == '90flip':
             return torch.rot90(noise_sample, 1, [2, 3])
-        elif mode in ('90rot', '135rot', '180rot', 'conic'):
+        elif mode in ('90rot', '135rot', '180rot', 'conic', 'conic_global'):
             # Use circular rotation warp for rotation transforms
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=False)
         elif mode == 'jigsaw':
@@ -924,7 +924,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             return torch.flip(noise_sample, [2])
         elif mode == '90flip':
             return torch.rot90(noise_sample, -1, [2, 3])
-        elif mode in ('90rot', '135rot', '180rot', 'conic'):
+        elif mode in ('90rot', '135rot', '180rot', 'conic', 'conic_global'):
             # Use circular rotation warp with inverse for rotation transforms
             return self.apply_laplacian_warp(noise_sample, transform_type=mode, inverse=True)
         elif mode == 'jigsaw':
@@ -1107,6 +1107,16 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         """
 
         lwp_use_pyramids = True if lwp else False
+        # The conic mirror compresses the whole of view 2 into a small
+        # circle, draining its Laplacian magnitudes; weight it up inside
+        # the blend (and rely less on magnitude selection) so the hidden
+        # view survives against the canonical view's high-contrast detail.
+        if transform_type == "conic":
+            lwp_alpha = getattr(self, '_conic_blend_alpha', 0.3)
+            lwp_w2 = getattr(self, '_conic_view2_weight', 0.65)
+        else:
+            lwp_alpha = 0.5
+            lwp_w2 = 0.5
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
@@ -1405,7 +1415,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
                         else:
                             clean_img_pred2 = self.flip_tensor(clean_img_pred2,mode=transform_type) #use like in geng et. al.
                             blend_mask = None
-                        blended_img = self.lwp(clean_img_pred1, clean_img_pred2, use_pyramids=lwp_use_pyramids, mask=blend_mask)
+                        blended_img = self.lwp(clean_img_pred1, clean_img_pred2, use_pyramids=lwp_use_pyramids, mask=blend_mask, alpha=lwp_alpha, w2=lwp_w2)
                     else : 
                         blended_img = clean_img_pred1
                     
@@ -1417,7 +1427,7 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
                         else:
                             correction_term2 = self.flip_tensor(correction_term2,mode=transform_type) #use like in geng et. al.
                             blend_mask = None
-                        blended_correction = self.lwp(correction_term, correction_term2, use_pyramids=lwp_use_pyramids, mask=blend_mask)
+                        blended_correction = self.lwp(correction_term, correction_term2, use_pyramids=lwp_use_pyramids, mask=blend_mask, alpha=lwp_alpha, w2=lwp_w2)
                     else : 
                         blended_correction = correction_term
 
@@ -1473,6 +1483,46 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             self._apply_conic_soften = True
             image2 = self.inverse_flip_tensor(image,mode=transform_type) #use inverse to get correct rotated view
             self._apply_conic_soften = False
+
+            # Conic view-2 refinement (SDEdit-style). The derived image2 is
+            # a magnified blow-up of image1's circle, and the cone's radial
+            # inversion is discontinuous at the view-2 center (the middle of
+            # the hidden image is assembled from the circle's rim ring), so
+            # the raw inverse warp always looks pinched/smeared there.
+            # Re-noise it to a moderate sigma and denoise the tail of the
+            # schedule with the view-2 prompt: the model repaints a coherent
+            # subject over the warped structure. Strength bounds how far the
+            # result may deviate from the exact inverse warp.
+            refine_strength = getattr(self, "_conic_view2_refine", 0.8)
+            if transform_type == "conic" and refine_strength > 0:
+                lat2 = self.retrieve_latents(
+                    self.vae.encode(image2.to(self.vae.dtype)), generator)
+                lat2 = (lat2 - self.vae.config.shift_factor) * self.vae.config.scaling_factor
+                sigmas_r = self.scheduler.sigmas.to(device=lat2.device)
+                start_candidates = (sigmas_r[:-1] <= refine_strength).nonzero()
+                start_idx = (int(start_candidates[0].item())
+                             if len(start_candidates) else len(sigmas_r) - 2)
+                noise_r = randn_tensor(lat2.shape, generator=generator,
+                                       device=lat2.device, dtype=lat2.dtype)
+                sig0 = sigmas_r[start_idx].to(lat2.dtype)
+                lat = (1.0 - sig0) * lat2 + sig0 * noise_r
+                for ri in range(start_idx, len(timesteps)):
+                    lat_in = torch.cat([lat] * 2)
+                    t_exp = timesteps[ri].expand(lat_in.shape[0])
+                    pred = self.transformer(
+                        hidden_states=lat_in,
+                        timestep=t_exp,
+                        encoder_hidden_states=prompt_embeds2,
+                        pooled_projections=pooled_prompt_embeds2,
+                        joint_attention_kwargs=self.joint_attention_kwargs,
+                        return_dict=False,
+                    )[0]
+                    p_uncond, p_text = pred.chunk(2)
+                    v = p_uncond + self.guidance_scale * (p_text - p_uncond)
+                    lat = lat + (sigmas_r[ri + 1] - sigmas_r[ri]).to(lat.dtype) * v
+                lat = (lat / self.vae.config.scaling_factor) + self.vae.config.shift_factor
+                image2 = self.vae.decode(lat, return_dict=False)[0]
+
             image = self.image_processor.postprocess(image, output_type=output_type)
             image2 = self.image_processor.postprocess(image2, output_type=output_type)
             
@@ -1541,15 +1591,44 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
             warp, mask = create_circular_rotation_warp(h, w, angle, radius_ratio=0.45)
 
         elif transform_type == "conic":
-            # Conic mirror anamorphosis (polar unwrap of an annulus)
+            # Conic mirror: an inner circle of view 1 hides the WHOLE of
+            # view 2 (radial inversion + scale, reach following the square
+            # boundary). Outside the circle view 1 passes through.
+            radius_ratio = getattr(self, '_conic_radius_ratio', 0.27)
+            cache = getattr(self, "_conic_warp_cache", {})
+            for inv_flag in (False, True):
+                key = ("inner", h, w, radius_ratio, inv_flag)
+                if key not in cache:
+                    cache[key] = create_conic_inner_mirror_warp(
+                        h, w,
+                        radius_ratio=radius_ratio,
+                        inverse=inv_flag,
+                    )
+                    self._conic_warp_cache = cache
+            warp, mask = cache[("inner", h, w, radius_ratio, inverse)]
+            # The view2 <- circle sampling field, needed by the inverse
+            # Laplacian warping below when going pred2 -> canonical.
+            conic_warp_inv = cache[("inner", h, w, radius_ratio, True)][0]
+
+        elif transform_type == "conic_global":
+            # Paper-style full-canvas conic anamorphosis (ray-traced cone,
+            # whole image is the mirror view). Cache per (size, params,
+            # direction) — construction ray-traces the cone and runs
+            # multi-scale scipy fills (~1-2.5s at 1024²), and the denoising
+            # loop requests the same warp 4x per step.
             r_in_ratio = getattr(self, '_conic_r_in_ratio', 0.15)
             r_out_ratio = getattr(self, '_conic_r_out_ratio', 0.95)
-            warp, mask = create_conic_mirror_warp(
-                h, w,
-                r_in_ratio=r_in_ratio,
-                r_out_ratio=r_out_ratio,
-                inverse=inverse,
-            )
+            cache = getattr(self, "_conic_warp_cache", {})
+            cache_key = ("global", h, w, r_in_ratio, r_out_ratio, inverse)
+            if cache_key not in cache:
+                cache[cache_key] = create_conic_mirror_warp(
+                    h, w,
+                    r_in_ratio=r_in_ratio,
+                    r_out_ratio=r_out_ratio,
+                    inverse=inverse,
+                )
+                self._conic_warp_cache = cache
+            warp, mask = cache[cache_key]
 
         elif transform_type == "jigsaw":
             # Jigsaw puzzle permutation
@@ -1574,24 +1653,58 @@ class StableDiffusion3Pipeline(DiffusionPipeline, SD3LoraLoaderMixin, FromSingle
         if mask is not None:
             mask = mask.to(image.device, dtype=image.dtype)
 
-        # LOD-aware sampling only for the forward conic direction (rect →
-        # annulus), where local compression near the inner ring would
-        # alias high-frequency content. For the inverse direction
-        # (canonical → rect) and all other transforms we use plain
-        # bilinear so the final view2 stays sharp.
+        # LOD-aware (mip-mapped) sampling for the locally-contracting conic
+        # directions, plain bilinear everywhere else so views stay sharp:
+        #   - "conic" inverse (annulus → disk): the annulus is compressed
+        #     into the disk, with unbounded azimuthal compression at the
+        #     disk center.
+        #   - "conic_global" forward (rect → disk): compression near the
+        #     cone apex.
         if transform_type == "conic" and not inverse:
-            warped = view_lod(image, warp, leveln=5, padding_mode='border')
+            # Paper-style inverse Laplacian warping (suppl. A.2): bring
+            # view 2 into the canonical circle by backpropagating through
+            # the view2 <- circle sampling map. Unlike direct sampling,
+            # this scatters content into the correct frequency bands, so
+            # view 2's structure survives the strong compression (and the
+            # center <-> rim inversion's azimuthal stretch) instead of
+            # arriving with drained Laplacian magnitudes.
+            warped = laplacian_warp_inverse(
+                image.float(),
+                conic_warp_inv.to(image.device, dtype=torch.float32),
+                leveln=6,
+            )
+        elif transform_type == "conic" or (
+                transform_type == "conic_global" and not inverse):
+            warped = view_lod(image, warp, leveln=6, padding_mode='border')
         else:
             warped = view_simple(image, warp)
 
-        # Conic inverse: only apply soften_inverse_conic at the final image2
-        # step (set self._apply_conic_soften = True before the final
+        # Confine the inner-circle conic warp strictly to its disk: the
+        # warp's sampling region extends a feather-width past the rim (so
+        # the rim blend has warped content on both sides), which would
+        # otherwise leave a thin ring of warped content outside the circle
+        # in the raw output. Soft-composite with the disk mask so outside
+        # the circle the image passes through untouched.
+        if transform_type == "conic" and mask is not None:
+            m_soft = mask.to(warped.device, dtype=warped.dtype)
+            if m_soft.shape[0] != warped.shape[0]:
+                m_soft = m_soft.expand(warped.shape[0], -1, -1, -1)
+            if m_soft.shape[1] != warped.shape[1]:
+                m_soft = m_soft.expand(-1, warped.shape[1], -1, -1)
+            warped = m_soft * warped + (1.0 - m_soft) * image.to(warped.dtype)
+
+        # Global-conic inverse: only apply soften_inverse_conic at the final
+        # image2 step (set self._apply_conic_soften = True before the final
         # inverse_flip_tensor call). Skipping it during the denoising loop
         # avoids the expensive scipy gaussian filters that would otherwise
         # run on every latent channel at every timestep and stall progress.
-        if (transform_type == "conic" and inverse and mask is not None
+        # The inner-region "conic" warp is hole-free and needs no soften.
+        if (transform_type == "conic_global" and inverse and mask is not None
                 and getattr(self, "_apply_conic_soften", False)):
-            warped = soften_inverse_conic(warped, mask)
+            # VAE-decode-space images live in [-1, 1]; without the range
+            # the soften clamps to [0, 1] (washing out the image) and the
+            # outside "black" fade lands on mid-gray after postprocess.
+            warped = soften_inverse_conic(warped, mask, value_range=(-1.0, 1.0))
 
         # Store mask as instance attribute for use in blending
         self._current_warp_mask = mask
