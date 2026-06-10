@@ -23,6 +23,12 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=1, help="Random seed for generation.")
 parser.add_argument("--num-inference-steps", type=int, default=28, help="Number of denoising steps.")
 parser.add_argument("--guidance-scale", type=float, default=3.5, help="Embedded guidance scale for Flux.")
+parser.add_argument("--true-cfg-scale", type=float, default=3.0,
+                    help="True CFG scale (>1 enables real cond/uncond CFG like SD3.5; "
+                         "set to 1.0 for the original embedded-guidance-only behavior).")
+parser.add_argument("--negative-prompt", default="", help="Negative prompt for true CFG.")
+parser.add_argument("--negative-prompt2", default=None,
+                    help="Per-view negative prompt for the second view (defaults to --negative-prompt).")
 parser.add_argument("--height", type=int, default=1024, help="Image height.")
 parser.add_argument("--width", type=int, default=1024, help="Image width.")
 parser.add_argument("--time-travel", type=int, default=2, help="Number of time-travel backward steps.")
@@ -31,6 +37,8 @@ parser.add_argument("--time-travel-range", type=int, nargs=2, default=[20, 80],
 parser.add_argument("--denoise-last-steps", type=int, default=3,
                     help="Number of final steps for single-view denoising.")
 parser.add_argument("--no-lwp", action="store_true", help="Disable Laplacian Weighted Pooling.")
+parser.add_argument("--lwp-alpha", type=float, default=0.5,
+                    help="Blend weight toward value-weighted average (0=plain average, 1=full vavg).")
 parser.add_argument("--no-denoise-last", action="store_true", help="Disable final single-view denoising.")
 args = parser.parse_args()
 
@@ -45,6 +53,9 @@ image1, image2 = pipe(
     height=args.height,
     width=args.width,
     guidance_scale=args.guidance_scale,
+    true_cfg_scale=args.true_cfg_scale,
+    negative_prompt=args.negative_prompt,
+    negative_prompt_image2=args.negative_prompt2,
     transform_type=transform_type,
     time_travel=args.time_travel,
     generator=torch.Generator("cuda").manual_seed(seed),
@@ -53,6 +64,7 @@ image1, image2 = pipe(
     denoise_last_steps=args.denoise_last_steps,
     vis_intermediate=False,
     lwp=not args.no_lwp,
+    lwp_alpha=args.lwp_alpha,
 )
 
 os.makedirs(args.output_dir, exist_ok=True)

@@ -666,6 +666,10 @@ class FluxPipeline(
         prompt: Union[str, List[str]] = None,
         prompt_2: Optional[Union[str, List[str]]] = None,
         prompt_image2: Optional[Union[str, List[str]]] = None,
+        negative_prompt: Optional[Union[str, List[str]]] = None,
+        negative_prompt_2: Optional[Union[str, List[str]]] = None,
+        negative_prompt_image2: Optional[Union[str, List[str]]] = None,
+        true_cfg_scale: float = 1.0,
         height: Optional[int] = None,
         width: Optional[int] = None,
         num_inference_steps: int = 28,
@@ -690,6 +694,7 @@ class FluxPipeline(
         denoise_last_steps: int = 5,
         vis_intermediate: bool = False,
         lwp: bool = False,
+        lwp_alpha: float = 0.5,
     ):
         r"""
         Function invoked when calling the pipeline for anamorphic generation.
@@ -709,6 +714,12 @@ class FluxPipeline(
                 The number of denoising steps.
             guidance_scale (`float`, *optional*, defaults to 3.5):
                 Embedded guidance scale for Flux (passed to transformer, not used for CFG).
+            negative_prompt (`str` or `List[str]`, *optional*):
+                Negative prompt used for true classifier-free guidance when `true_cfg_scale > 1`.
+            true_cfg_scale (`float`, *optional*, defaults to 1.0):
+                When > 1, enables true CFG (batched cond/uncond passes, like SD3) on top of the
+                embedded guidance. This restores the per-step corrective pull toward each view's
+                prompt that the anamorphosis blending relies on.
             transform_type (`str`, *optional*):
                 Transformation type: "vertical", "horizontal", "90rot", "135rot", "180rot", "jigsaw".
             jigsaw_seed (`int`, *optional*, defaults to 42):
@@ -795,6 +806,38 @@ class FluxPipeline(
             lora_scale=lora_scale,
         )
 
+        do_true_cfg = true_cfg_scale > 1.0
+        if do_true_cfg:
+            (
+                negative_prompt_embeds,
+                negative_pooled_prompt_embeds,
+                _,
+            ) = self.encode_prompt(
+                prompt=negative_prompt if negative_prompt is not None else "",
+                prompt_2=negative_prompt_2,
+                device=device,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+                lora_scale=lora_scale,
+            )
+            # Per-view negative for the second stream (defaults to the shared negative)
+            if negative_prompt_image2 is not None:
+                (
+                    negative_prompt_embeds2,
+                    negative_pooled_prompt_embeds2,
+                    _,
+                ) = self.encode_prompt(
+                    prompt=negative_prompt_image2,
+                    prompt_2=None,
+                    device=device,
+                    num_images_per_prompt=num_images_per_prompt,
+                    max_sequence_length=max_sequence_length,
+                    lora_scale=lora_scale,
+                )
+            else:
+                negative_prompt_embeds2 = negative_prompt_embeds
+                negative_pooled_prompt_embeds2 = negative_pooled_prompt_embeds
+
         # 4. Prepare latent variables
         # Flux uses in_channels // 4 for the unpacked channel count
         num_channels_latents = self.transformer.config.in_channels // 4
@@ -869,6 +912,41 @@ class FluxPipeline(
         if self.joint_attention_kwargs is None:
             self._joint_attention_kwargs = {}
 
+        def transformer_pred(latents_in, prompt_embeds_in, pooled_in, text_ids_in, t_in,
+                             neg_embeds=None, neg_pooled=None):
+            # Single velocity prediction; with true CFG the cond/uncond passes are batched
+            # like the SD3 pipeline and combined via uncond + scale * (cond - uncond).
+            if do_true_cfg:
+                neg_embeds = neg_embeds if neg_embeds is not None else negative_prompt_embeds
+                neg_pooled = neg_pooled if neg_pooled is not None else negative_pooled_prompt_embeds
+                latent_model_input = torch.cat([latents_in] * 2)
+                encoder_hidden_states = torch.cat([neg_embeds, prompt_embeds_in])
+                pooled_projections = torch.cat([neg_pooled, pooled_in])
+            else:
+                latent_model_input = latents_in
+                encoder_hidden_states = prompt_embeds_in
+                pooled_projections = pooled_in
+
+            timestep_in = t_in.expand(latent_model_input.shape[0]).to(latent_model_input.dtype)
+            guidance_in = guidance.expand(latent_model_input.shape[0]) if guidance is not None else None
+
+            pred = self.transformer(
+                hidden_states=latent_model_input,
+                timestep=timestep_in / 1000,
+                guidance=guidance_in,
+                pooled_projections=pooled_projections,
+                encoder_hidden_states=encoder_hidden_states,
+                txt_ids=text_ids_in,
+                img_ids=latent_image_ids,
+                joint_attention_kwargs=self.joint_attention_kwargs,
+                return_dict=False,
+            )[0]
+
+            if do_true_cfg:
+                pred_uncond, pred_text = pred.chunk(2)
+                pred = pred_uncond + true_cfg_scale * (pred_text - pred_uncond)
+            return pred
+
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
         self.scheduler2.set_begin_index(0)
@@ -908,35 +986,16 @@ class FluxPipeline(
                 for i in time_range:
                     t = timesteps[i]
 
-                    # Flux uses embedded guidance (no CFG doubling of latents)
-                    timestep = t.expand(latents.shape[0]).to(latents.dtype)
-
                     # Forward pass for view 1
-                    noise_pred = self.transformer(
-                        hidden_states=latents,
-                        timestep=timestep / 1000,
-                        guidance=guidance,
-                        pooled_projections=pooled_prompt_embeds1,
-                        encoder_hidden_states=prompt_embeds1,
-                        txt_ids=text_ids1,
-                        img_ids=latent_image_ids,
-                        joint_attention_kwargs=self.joint_attention_kwargs,
-                        return_dict=False,
-                    )[0]
+                    noise_pred = transformer_pred(latents, prompt_embeds1, pooled_prompt_embeds1, text_ids1, t)
 
                     # Forward pass for view 2
                     if not denoise_one:
-                        noise_pred2 = self.transformer(
-                            hidden_states=latents2,
-                            timestep=timestep / 1000,
-                            guidance=guidance,
-                            pooled_projections=pooled_prompt_embeds2,
-                            encoder_hidden_states=prompt_embeds2,
-                            txt_ids=text_ids2,
-                            img_ids=latent_image_ids,
-                            joint_attention_kwargs=self.joint_attention_kwargs,
-                            return_dict=False,
-                        )[0]
+                        noise_pred2 = transformer_pred(
+                            latents2, prompt_embeds2, pooled_prompt_embeds2, text_ids2, t,
+                            neg_embeds=negative_prompt_embeds2 if do_true_cfg else None,
+                            neg_pooled=negative_pooled_prompt_embeds2 if do_true_cfg else None,
+                        )
 
                     # Step 4: one-step clean prediction (jump to the end)
                     clean_sample1 = self.scheduler.step_to_the_end(noise_pred, t, latents)[0]
@@ -985,7 +1044,7 @@ class FluxPipeline(
                         else:
                             clean_img_pred2 = self.flip_tensor(clean_img_pred2, mode=transform_type)
                             blend_mask = None
-                        blended_img = self.lwp(clean_img_pred1, clean_img_pred2, use_pyramids=lwp_use_pyramids, mask=blend_mask)
+                        blended_img = self.lwp(clean_img_pred1, clean_img_pred2, alpha=lwp_alpha, use_pyramids=lwp_use_pyramids, mask=blend_mask)
                     else:
                         blended_img = clean_img_pred1
 
@@ -997,7 +1056,7 @@ class FluxPipeline(
                         else:
                             correction_term2 = self.flip_tensor(correction_term2, mode=transform_type)
                             blend_mask = None
-                        blended_correction = self.lwp(correction_term, correction_term2, use_pyramids=lwp_use_pyramids, mask=blend_mask)
+                        blended_correction = self.lwp(correction_term, correction_term2, alpha=lwp_alpha, use_pyramids=lwp_use_pyramids, mask=blend_mask)
                     else:
                         blended_correction = correction_term
 
