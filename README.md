@@ -246,7 +246,19 @@ For more details please see the explanation [here](https://cedric-perauer.github
 
 ## Citations
 
-If you use this code, please cite the original papers. We thank the authors for their work:
+If you use this code, please cite the original papers and our codebase. We thank the authors for their work:
+
+
+```bibtex
+@misc{perauer2026latentgenerativeanamorphoses,
+  author = {Perauer, Cedric},
+  title = {LatentGenerativeAnamorphoses: 2D latent generative anamorphoses using Stable Diffusion 3.5},
+  year = {2026},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/Cedric-Perauer/LatentGenerativeAnamorphoses}}
+}
+```
 
 **LookingGlass (Laplacian Pyramid Warping method):**
 
